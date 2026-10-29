@@ -19,7 +19,7 @@ ACIS 代理也不用手动注入：第一次调 `acis_connect` 时，服务器�
 **一条命令**，开服务器 + 开 CST + 注入 ACIS 代理：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1 -WithCst
+py -3.12 tools\cstmcp.py up --isolated
 ```
 
 输出：
@@ -34,12 +34,12 @@ MCP endpoint : http://127.0.0.1:8765/mcp
 
 | 命令 | 作用 |
 |---|---|
-| `.\start.ps1` | 只开 MCP 服务器（VBA 层工具可用，ACIS 工具会报"未连接代理"） |
-| `.\start.ps1 -WithCst` | 再打开 CST + 新项目 + 注入 ACIS 代理 |
-| `.\start.ps1 -WithCst -Build` | 若代理 DLL 还没编译，先编再注 |
-| `.\start.ps1 -Port 8766` | 换端口 |
-| `.\stop.ps1` | 停服务器 |
-| `.\stop.ps1 -WithCst` | 连 CST 一起关 |
+| `py -3.12 tools\cstmcp.py up` | 只开 MCP 服务器（VBA 层工具可用，ACIS 工具会报"未连接代理"） |
+| `py -3.12 tools\cstmcp.py up -WithCst` | 再打开 CST + 新项目 + 注入 ACIS 代理 |
+| `py -3.12 tools\cstmcp.py up -WithCst -Build` | 若代理 DLL 还没编译，先编再注 |
+| `py -3.12 tools\cstmcp.py up -Port 8766` | 换端口 |
+| `py -3.12 tools\cstmcp.py down` | 停服务器 |
+| `py -3.12 tools\cstmcp.py down --with-cst` | 连 CST 一起关 |
 
 脚本是幂等的：服务器已在跑就直接复用，不会起第二个。
 
@@ -53,11 +53,11 @@ MCP endpoint : http://127.0.0.1:8765/mcp
 
 ```powershell
 $env:CST_MCP_TOKEN = "换成一个长随机串"
-powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1 -WithCst
+py -3.12 tools\cstmcp.py up --isolated
 # 客户端 header: Authorization: Bearer <token>
 ```
 
-> **换了会话用不了，通常是服务器进程没了。** MCP 是常驻进程，关掉终端/重启机器后要重新 `start.ps1`。
+> **换了会话用不了，通常是服务器进程没了。** MCP 是常驻进程，关掉终端/重启机器后要重新 `tools/cstmcp.py up`。
 > 判断方法：`curl http://127.0.0.1:8765/health`，返回 `{"ok":true,...}` 才是在跑。
 
 ## 先验证能不能附着
@@ -136,18 +136,24 @@ Invoke-RestMethod -Uri http://127.0.0.1:8765/mcp -Method Post -Headers $h -Body 
 
 ## 多 agent 共存
 
-CST 是单用户程序：两个进程同时驱动它会互相破坏（VBA 历史是全局的、modeler 只有一个 ACIS 实体管理器、DLL 注入两次会起两个管道服务）。所以本仓库用**单所有者模型**：
+每个 agent 用自己的一套栈，互不干扰：
 
+```powershell
+py -3.12 tools\cstmcp.py up --isolated     # 新 DE + 它的 modeler + 只注入到那个 modeler
+py -3.12 tools\cstmcp.py status            # DE/modeler/agent 的对应关系
+py -3.12 tools\cstmcp.py down --with-cst   # 停所有者并关掉它自己的 DE
 ```
-MCP 客户端 A (stdio) ─┐
-MCP 客户端 B (stdio) ─┼─► 所有者进程（唯一，持有 CST + ACIS + 请求队列）
-MCP 客户端 C (HTTP)  ─┘
+
+隔离是**进程级**的：不同 agent 的 DE、modeler、命名管道、VBA 历史全部分开，不会排队也不会互相踩。
+代价是每套栈占一份 CST license，首次启动约 25 秒。
+
+复用已有栈（只重启服务器）：
+
+```powershell
+py -3.12 tools\cstmcp.py up --de-pid <DE-pid> --modeler-pid <modeler-pid>
 ```
 
-- `--stdio` 现在只是**代理**：它先确认 8765 上有 `cst-mcp` 所有者（`/health` 里的 `app` 字段），没有就自己拉起一个，然后把 JSON-RPC 逐行转发过去。多个客户端因此共用同一个所有者，不会各起一份 Python 桥。
-- 端口已被别的程序占用时，所有者拒绝启动（`EADDRINUSE`，退出码 3），不会去抢。
-- `stop.ps1` 只杀 `/health` 里自报 `app: cst-mcp` 的进程，不会误杀别人；端口被陌生程序占住时会拒绝并要求 `-Force`。
-
+stdio 默认连共享所有者（8765）；要私有栈在客户端 args 里加 `--isolated`。
 ## ACIS 模式（进程内直调）
 
 除了 VBA 层，还有一组工具直连 `modeler_AMD64.exe` 里的 ACIS 内核，能做 VBA 表达不了的直接建模（偏置面、推壳、变半径倒圆……）。

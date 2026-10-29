@@ -26,30 +26,41 @@
 **B. HTTP（跨进程、多客户端、远程）**
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File C:\Projects\cst-mcp\start.ps1 -WithCst
+py -3.12 C:\Projects\cst-mcp\tools\cstmcp.py up --isolated
 ```
 
 ```
 http://127.0.0.1:8765/mcp      # 客户端配置 {"type":"http","url":"..."}
 ```
 
-`start.ps1` 幂等；`stop.ps1` 关闭。判断是否在跑：`GET /health` 返回 `{"ok":true,"app":"cst-mcp",...}`。
+`tools/cstmcp.py up` 幂等；`tools/cstmcp.py down` 关闭。判断是否在跑：`GET /health` 返回 `{"ok":true,"app":"cst-mcp",...}`。
 
-## 多个 agent 共用（重要）
+## 多个 agent 共用
 
-CST 是单用户程序，**只能有一个进程驱动它**。所以本仓库是单所有者模型：
+**每个 agent 用自己的一套栈**：`up --isolated` 会新开一个 Design Environment、它自己的 `modeler_AMD64.exe`，
+并把 ACIS 代理只注入到那个 modeler。彼此的进程、命名管道、VBA 历史全部独立，互不排队。
+代价：每个栈占一份 CST license，首次启动约 25 秒。
 
-- 所有客户端（stdio 或 HTTP）都走**同一个所有者进程**，由它独占 CST 连接和 ACIS 管道。
-- `--stdio` 只是代理：找不到所有者就自己拉起一个，然后把请求转发过去。**多开无害**。
-- 端口被别的程序占用时所有者拒绝启动；`stop.ps1` 只杀自报 `app: cst-mcp` 的进程，不会误杀。
-- 不要自己再起第二个 HTTP 所有者，也不要直接跑 `node src/server.mjs` 去抢同一个端口。
+```powershell
+py -3.12 tools\cstmcp.py up --isolated     # 私有栈 + 所有者，端口自动从 8770 起
+py -3.12 tools\cstmcp.py status            # 谁在跑、哪个 modeler 装了 agent
+py -3.12 tools\cstmcp.py down --with-cst   # 停所有者并关掉它自己的 DE
+```
 
+已经有一个栈、只想重启服务器时，不用重建 CST：
+
+```powershell
+py -3.12 tools\cstmcp.py up --de-pid <DE-pid> --modeler-pid <modeler-pid>
+```
+
+- stdio 默认是**共享**代理（连 8765 的所有者）；要私有栈就在客户端配置里加 `--isolated`。
+- 不要手动 `node src/server.mjs` 起第二个所有者抢同一端口。
 ## 前置条件
 
 | 项 | 说明 |
 |---|---|
 | CST 2022 | 装在 `C:\Programs\CST Studio Suite 2022`（路径写死在 `bridge/cst_bridge.py` 与 `CONFIG.python`） |
-| Node ≥ 20 | 已 `npm install`（`start.ps1` 会自动补） |
+| Node ≥ 20 | 已 `npm install`（`tools/cstmcp.py up` 会自动补） |
 | ACIS 代理 | **不需要手动注入**：首次调用 `acis_connect` 时服务器会自动找最新的 `native/cst_acis_agent*.dll` 注入到 `modeler_AMD64.exe`（首次约 30 秒，之后秒回） |
 | CST 3D 项目 | ACIS 工具要求 `modeler_AMD64.exe` 在跑（CST 里打开一个 3D 项目） |
 
@@ -102,14 +113,14 @@ cst_import_step → cst_export_sat → acis_connect → acis_export_sat? 否：
 4. **`MoveSelectedFaces` 沿平面自身方向平移无效**，推拉用 `OffsetSelectedFaces`。
 5. **原生 DLL 必须 `/MD` 编译。** 用静态 CRT（`/MT`）时任何传给 ACIS 的 `FILE*` 都会让它 fail-fast 崩在 `ucrtbase`。
 6. **ACIS 代理 DLL 不能卸载**，重测要重启 `modeler_AMD64.exe`。
-7. **不要同时跑两个服务器占同一端口**；`start.ps1` 会检测并复用。
+7. **不要同时跑两个服务器占同一端口**；`tools/cstmcp.py up` 会检测并复用。
 
 ## 排障
 
 | 现象 | 原因 / 处理 |
 |---|---|
-| HTTP 连不上 | 进程没了，跑 `start.ps1`；`GET /health` 确认 |
+| HTTP 连不上 | 进程没了，跑 `tools/cstmcp.py up`；`GET /health` 确认 |
 | `acis_connect` 报找不到 modeler | CST 没开 3D 项目 |
-| `acis_connect` 报 no built DLL | `start.ps1 -WithCst -Build` 或 `native/build.bat` |
+| `acis_connect` 报 no built DLL | `native/build.bat`（或 `py -3.12 tools\cstmcp.py isolate` 会自动注入已编译的版本） |
 | `cst_status` 显示 `connected:false` | 正常，先 `cst_connect` |
 | 工具调用成功但模型没变 | 见坑 2，历史列表可能已停摆 |

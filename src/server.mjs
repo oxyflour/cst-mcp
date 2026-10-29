@@ -16,6 +16,8 @@ import { randomUUID } from "node:crypto";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
+const PYTHON = process.env.CST_MCP_PYTHON ?? "py";
+const PYTHON_ARGS = process.env.CST_MCP_PYTHON_ARGS ? process.env.CST_MCP_PYTHON_ARGS.split(" ") : ["-3.12"];
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { z } from "zod";
@@ -33,6 +35,10 @@ const CONFIG = {
   python: process.env.CST_PYTHON ?? "C:\\Programs\\CST Studio Suite 2022\\AMD64\\python\\python.exe",
   bridge: process.env.CST_BRIDGE ?? path.join(ROOT, "bridge", "cst_bridge.py"),
   callTimeoutMs: Number(process.env.CST_CALL_TIMEOUT_MS ?? 600_000),
+  // Isolated mode: pin this server to one DE / one modeler, so several agents
+  // can each own a private CST stack (0 = not pinned, use whatever is running).
+  dePid: Number(process.env.CST_MCP_DE_PID ?? 0),
+  modelerPid: Number(process.env.CST_MCP_MODELER_PID ?? 0),
 };
 
 /* ------------------------------------------------------------------ bridge */
@@ -154,14 +160,11 @@ function newestAgentDll() {
  */
 async function autoInject(pid) {
   const dll = newestAgentDll();
-  const script = path.join(ROOT, "native", "inject.ps1");
-  if (!dll || !fs.existsSync(script)) return false;
-  await execFileAsync(
-    "powershell",
-    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-ProcessId", String(pid), "-Dll", dll],
-    { windowsHide: true },
-  );
-  await new Promise((r) => setTimeout(r, 1500));
+  const tool = path.join(ROOT, "tools", "cstmcp.py");
+  if (!dll || !fs.existsSync(tool)) return false;
+  // Python does the injection (ctypes); no PowerShell anywhere in the path.
+  await execFileAsync(PYTHON, [...PYTHON_ARGS, tool, "inject", String(pid), "--dll", dll], { windowsHide: true });
+  await new Promise((r) => setTimeout(r, 1200));
   return true;
 }
 
@@ -221,7 +224,9 @@ function buildServer() {
     },
     async ({ mode, pid }) => {
       try {
-        return text(await bridge.call("de.connect", { mode, pid }));
+        // In isolated mode every call is pinned to our own DE, never "any".
+        const target = CONFIG.dePid ? { mode: "pid", pid: CONFIG.dePid } : { mode, pid };
+        return text(await bridge.call("de.connect", target));
       } catch (err) {
         return fail(err);
       }
@@ -440,7 +445,8 @@ function buildServer() {
     },
     async ({ pid }) => {
       try {
-        const target = pid ?? (await findModelerPid());
+        // Pinned modeler wins: that is the one belonging to *our* DE.
+        const target = pid ?? CONFIG.modelerPid ?? (await findModelerPid());
         try {
           await acis.connect(target);
         } catch (first) {
@@ -673,7 +679,29 @@ async function ensureOwner() {
   throw new Error(`owner did not come up on port ${CONFIG.port}`);
 }
 
-if (USE_STDIO) {
+const ISOLATED = process.argv.includes("--isolated") || process.env.CST_MCP_ISOLATED === "1";
+
+if (ISOLATED && USE_STDIO) {
+  // One private CST stack per client: a new Design Environment, its own
+  // modeler process, and the agent injected into that modeler only. Nothing is
+  // shared with other agents, so no queueing and no cross-talk.
+  const log = (m) => process.stderr.write(`[cst-mcp] ${m}\n`);
+  log("isolated mode: starting a private CST stack");
+  const { stdout } = await execFileAsync(
+    "powershell",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(ROOT, "scripts", "isolate.ps1")],
+    { windowsHide: true, maxBuffer: 1 << 20 },
+  );
+  const line = stdout.trim().split(/\r?\n/).filter(Boolean).pop();
+  const info = JSON.parse(line);
+  CONFIG.dePid = info.dePid;
+  CONFIG.modelerPid = info.modelerPid;
+  log(`private stack: DE ${info.dePid}, modeler ${info.modelerPid}, agent ${info.agent}`);
+
+  const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
+  const server = buildServer();
+  await server.connect(new StdioServerTransport());
+} else if (USE_STDIO) {
   // Thin proxy: stdin line -> POST /mcp -> stdout line. Notifications (no id)
   // are forwarded without expecting a body.
   const log = (m) => process.stderr.write(`[cst-mcp] ${m}\n`);

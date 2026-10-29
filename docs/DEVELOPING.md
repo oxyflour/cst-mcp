@@ -7,13 +7,13 @@
 ```powershell
 cd C:\Projects\cst-mcp
 npm install                                  # 只改了 JS 时不需要重装
-powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1 -WithCst -Build
+py -3.12 tools\cstmcp.py up --isolated
 ```
 
 改了 `src/*.mjs` 或 `bridge/*.py` → 重启服务器即可：
 
 ```powershell
-.\stop.ps1 ; .\start.ps1 -WithCst
+py -3.12 tools\cstmcp.py down ; py -3.12 tools\cstmcp.py up -WithCst
 ```
 
 改了 `native/*.cpp` → 必须重新编译并**重启 modeler**（DLL 不能卸载，见下文）。
@@ -28,9 +28,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1 -WithCst -Build
 | `native/cst_acis_agent.cpp` | 常驻代理（管道服务 + UI 线程调度 + ACIS 调用） | 崩溃半径是整个 CST 会话 |
 | `native/acis_shim.h` | `outcome_slot`、`SPAposition`、符号常量 | 所有 ABI 假设都在这里 |
 | `native/acis_direct.h` | 直接建模子集的函数指针类型 | 含回引的函数标了 `INFERRED` |
-| `native/inject.ps1` | 注入器（`CreateRemoteThread(LoadLibraryW)`） | 换 DLL 名不会重跑 `DllMain`，要用新文件名 |
+| `tools/cstmcp.py inject` | 注入器（`CreateRemoteThread(LoadLibraryW)`） | 换 DLL 名不会重跑 `DllMain`，要用新文件名 |
 | `native/build.bat` | MSVC 构建 | **`/MD` 不能去掉** |
-| `scripts/*.py` `scripts/*.ps1` | 符号扫描、反汇编、ABI 探测、导入测试 | 都是只读诊断工具 |
+| `scripts/*.py` `tools/cstmcp.py` | 符号扫描、反汇编、ABI 探测、导入测试 | 都是只读诊断工具 |
 
 三个入口的关系：
 
@@ -85,7 +85,7 @@ if (strncmp(line, "foo ", 4) == 0) { ...; Reply("OK ..."); return; }
 ```
 
 - **所有 ACIS 调用必须在 UI 线程**——`RunRequest` 已经跑在主线程，别自己起线程。
-- 新符号：`Res<...>(g_api.h, "?api_xxx@@...")`，先用 `scripts/check_symbols.ps1` 验证能解析。
+- 新符号：`Res<...>(g_api.h, "?api_xxx@@...")`，先用 `py -3.12 tools/cstmcp.py symbols` 验证能解析。
 - 返回体的大小/对齐见 `acis_shim.h` 的 `outcome_slot`。
 
 然后在 `src/acis.mjs` 或 `server.mjs` 里加对应工具，发一行命令。
@@ -99,7 +99,7 @@ if (strncmp(line, "foo ", 4) == 0) { ...; Reply("OK ..."); return; }
 3. 语义必须查文档，不要猜。权威来源：
    - CST 自带 VBA 文档 `Online Help\mergedProjects\VBA_3D\`（对象方法，优先用）
    - ACIS 文档 `http://www-isl.ece.arizona.edu/ACIS-docs/`（R10，函数参考在 `PDF/LOP/03FN.PDF`）
-4. 先在 `scripts/check_symbols.ps1` 加常量、确认能 `GetProcAddress`，再写调用。
+4. 先在 `py -3.12 tools/cstmcp.py symbols` 加常量、确认能 `GetProcAddress`，再写调用。
 
 ## 构建
 
@@ -116,7 +116,7 @@ cl /nologo /LD /MD /O2 /EHsc /std:c++17 cst_acis_agent.cpp /Fe:cst_acis_agent13.
 - **`/MD` 不能少。** 静态 CRT（`/MT`）下，任何交给 ACIS 的 `FILE*` 都会让它 fail-fast 崩在
   `ucrtbase`（`0xC0000409`，偏移 `0x11858`）。这个坑花了很久才定位。
 - **改了 DLL 就换文件名**（`agent13` → `agent14`），因为已加载的模块不会重跑 `DllMain`。
-  `start.ps1` 自动挑编号最大的那个。
+  `tools/cstmcp.py up` 自动挑编号最大的那个。
 - 目标进程是 `modeler_AMD64.exe`（x64），**不是** `CST DESIGN ENVIRONMENT_AMD64.exe`。
 
 ## 验证回路
@@ -125,10 +125,10 @@ cl /nologo /LD /MD /O2 /EHsc /std:c++17 cst_acis_agent.cpp /Fe:cst_acis_agent13.
 
 ```powershell
 # 1. 符号层（不开 CST、不注入）
-.\scripts\check_symbols.ps1
+py -3.12 tools\cstmcp.py symbols
 
 # 2. 起环境（会自动编译/注入）
-.\start.ps1 -WithCst -Build
+py -3.12 tools\cstmcp.py up -WithCst -Build
 
 # 3. 走 MCP 调一次
 curl -s http://127.0.0.1:8765/mcp -H "content-type: application/json" `
