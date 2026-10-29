@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "cst": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["C:/Projects/cst-mcp/src/server.mjs", "--stdio"]
+    }
+  }
+}

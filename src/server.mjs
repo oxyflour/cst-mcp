@@ -11,8 +11,11 @@
  * a desktop host, HTTP for remote clients) without touching the CST adapter.
  */
 import http from "node:http";
+import fs from "node:fs";
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
+import { promisify } from "node:util";
+const execFileAsync = promisify(execFile);
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { z } from "zod";
@@ -130,6 +133,37 @@ class Bridge {
 
 const bridge = new Bridge();
 const acis = new AcisPipe();
+
+/** Newest compiled agent DLL, e.g. native/cst_acis_agent12.dll. */
+function newestAgentDll() {
+  try {
+    const hits = fs
+      .readdirSync(path.join(ROOT, "native"))
+      .filter((n) => /^cst_acis_agent\d+\.dll$/i.test(n))
+      .map((n) => ({ n, v: Number(n.match(/(\d+)/)[1]) }))
+      .sort((a, b) => a.v - b.v);
+    return hits.length ? path.join(ROOT, "native", hits[hits.length - 1].n) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Inject the ACIS agent on demand. Keeps `acis_*` usable from a cold start
+ * without asking the caller to run a PowerShell script first.
+ */
+async function autoInject(pid) {
+  const dll = newestAgentDll();
+  const script = path.join(ROOT, "native", "inject.ps1");
+  if (!dll || !fs.existsSync(script)) return false;
+  await execFileAsync(
+    "powershell",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-ProcessId", String(pid), "-Dll", dll],
+    { windowsHide: true },
+  );
+  await new Promise((r) => setTimeout(r, 1500));
+  return true;
+}
 
 /* -------------------------------------------------------------------- tools */
 
@@ -407,7 +441,13 @@ function buildServer() {
     async ({ pid }) => {
       try {
         const target = pid ?? (await findModelerPid());
-        await acis.connect(target);
+        try {
+          await acis.connect(target);
+        } catch (first) {
+          // not injected yet: do it ourselves, then retry once
+          if (!(await autoInject(target))) throw first;
+          await acis.connect(target);
+        }
         return text(await acis.send("ping").then((r) => ({ pid: target, reply: r })));
       } catch (err) {
         return fail(err);
@@ -582,10 +622,24 @@ const httpServer = http.createServer(async (req, res) => {
   }
 });
 
-httpServer.listen(CONFIG.port, CONFIG.host, () => {
-  console.log(`[cst-mcp] listening on http://${CONFIG.host}:${CONFIG.port}/mcp`);
-  console.log(`[cst-mcp] bridge python: ${CONFIG.python}`);
-});
+// Two transports, same tools:
+//   --stdio  : the client spawns this process; nothing has to be pre-started.
+//   (default): long-lived HTTP endpoint for remote or multi-client use.
+const USE_STDIO = process.argv.includes("--stdio") || process.env.CST_MCP_TRANSPORT === "stdio";
+
+if (USE_STDIO) {
+  const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
+  const server = buildServer();
+  // stdout carries the protocol; diagnostics must go to stderr only.
+  const log = (msg) => process.stderr.write(`[cst-mcp] ${msg}\n`);
+  log(`stdio transport, bridge python: ${CONFIG.python}`);
+  await server.connect(new StdioServerTransport());
+} else {
+  httpServer.listen(CONFIG.port, CONFIG.host, () => {
+    console.log(`[cst-mcp] listening on http://${CONFIG.host}:${CONFIG.port}/mcp`);
+    console.log(`[cst-mcp] bridge python: ${CONFIG.python}`);
+  });
+}
 
 const shutdown = () => {
   bridge.stop();
