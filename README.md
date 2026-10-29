@@ -2,13 +2,34 @@
 
 CST Studio Suite 2022 的 MCP 服务器（Streamable HTTP）。设计取舍与"要不要注入 DLL"的分析见 [docs/architecture.md](docs/architecture.md)。
 
-## 运行
+## 快速启动
+
+**一条命令**，开服务器 + 开 CST + 注入 ACIS 代理：
 
 ```powershell
-npm install
-npm start
-# [cst-mcp] listening on http://127.0.0.1:8765/mcp
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1 -WithCst
 ```
+
+输出：
+
+```
+server started: pid 91380
+opening a CST project...
+agent injected: cst_acis_agent12.dll -> modeler 39412
+
+MCP endpoint : http://127.0.0.1:8765/mcp
+```
+
+| 命令 | 作用 |
+|---|---|
+| `.\start.ps1` | 只开 MCP 服务器（VBA 层工具可用，ACIS 工具会报"未连接代理"） |
+| `.\start.ps1 -WithCst` | 再打开 CST + 新项目 + 注入 ACIS 代理 |
+| `.\start.ps1 -WithCst -Build` | 若代理 DLL 还没编译，先编再注 |
+| `.\start.ps1 -Port 8766` | 换端口 |
+| `.\stop.ps1` | 停服务器 |
+| `.\stop.ps1 -WithCst` | 连 CST 一起关 |
+
+脚本是幂等的：服务器已在跑就直接复用，不会起第二个。
 
 客户端配置：
 
@@ -20,9 +41,12 @@ npm start
 
 ```powershell
 $env:CST_MCP_TOKEN = "换成一个长随机串"
-npm start
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1 -WithCst
 # 客户端 header: Authorization: Bearer <token>
 ```
+
+> **换了会话用不了，通常是服务器进程没了。** MCP 是常驻进程，关掉终端/重启机器后要重新 `start.ps1`。
+> 判断方法：`curl http://127.0.0.1:8765/health`，返回 `{"ok":true,...}` 才是在跑。
 
 ## 先验证能不能附着
 

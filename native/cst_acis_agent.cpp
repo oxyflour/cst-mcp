@@ -1,4 +1,4 @@
-// cst_acis_agent.dll -- resident in-process ACIS agent for modeler_AMD64.exe.
+﻿// cst_acis_agent.dll -- resident in-process ACIS agent for modeler_AMD64.exe.
 //
 // Differences from cst_acis_probe.dll: it does not run once and exit. It opens
 //   \\.\pipe\cst-acis-<pid>
@@ -88,6 +88,38 @@ typedef void (__cdecl* pfn_transf6)(void*, const void*, const void*, double, int
 #define SYM_GET_BOX "?api_get_entity_box@@YA?AVoutcome@@AEBVENTITY_LIST@@AEAVSPAposition@@1PEAVSPAboxing_options@@PEAVAcisOptions@@@Z"
 #define SYM_TWEAK_FACES "?api_tweak_faces@@YA?AVoutcome@@HQEAPEAVFACE@@QEAPEAVSURFACE@@QEAHVSPAposition@@3PEAVAcisOptions@@@Z"
 
+// ------------------------------------------------------------- defeature
+// SPADefeature.dll is a separate Spatial component: it is not loaded by CST,
+// so we pull it in from the same directory as SpaACIS.dll.
+typedef outcome_slot(__cdecl* pfn_dft_init)();
+typedef outcome_slot(__cdecl* pfn_dft_run)(BODY*, void*, AcisOptions*);
+typedef outcome_slot(__cdecl* pfn_dft_flag)(void*, int);
+typedef int (__cdecl* pfn_dft_count)(const void*);
+typedef outcome_slot(__cdecl* pfn_dft_get)(const void*, int, void*, int*);
+
+#define SYM_DFT_INIT  "?api_initialize_defeature@@YA?AVoutcome@@XZ"
+#define SYM_DFT_RUN   "?api_find_and_remove_features@@YA?AVoutcome@@PEAVBODY@@PEAVdefeature_options@@PEAVAcisOptions@@@Z"
+#define SYM_DFT_CTOR  "??0defeature_options@@QEAA@XZ"
+#define SYM_DFT_DTOR  "??1defeature_options@@QEAA@XZ"
+#define SYM_DFT_PAUSE "?set_pause_after_recognize@defeature_options@@QEAA?AVoutcome@@H@Z"
+#define SYM_DFT_HOLES "?set_recognize_holes@defeature_options@@QEAA?AVoutcome@@H@Z"
+#define SYM_DFT_CHAMF "?set_recognize_chamfers@defeature_options@@QEAA?AVoutcome@@H@Z"
+#define SYM_DFT_BLEND "?set_recognize_blends@defeature_options@@QEAA?AVoutcome@@H@Z"
+#define SYM_DFT_NUM   "?get_num_features@defeature_options@@QEBAHXZ"
+#define SYM_DFT_GET   "?get_feature@defeature_options@@QEBA?AVoutcome@@HAEAVENTITY_LIST@@AEAW4defeature_feature_type@@@Z"
+
+struct Dft {
+    HMODULE h;
+    pfn_dft_init init;
+    pfn_dft_run run;
+    void(__cdecl* ctor)(void*);
+    void(__cdecl* dtor)(void*);
+    pfn_dft_flag pause, holes, chamfers, blends;
+    pfn_dft_count num;
+    pfn_dft_get get;
+};
+static Dft g_dft;
+
 struct Api {
     HMODULE h;
     pfn_outcome_ok ok;
@@ -154,6 +186,127 @@ static bool ResolveAll(Api& a) {
     a.lop_dtor = Res<pfn_obj_ctor>(a.h, SYM_LOP_DTOR);
     return a.ok && a.dtor && a.solid_block && a.get_faces &&
            a.list_ctor && a.list_dtor && a.list_count && a.list_at;
+}
+
+static bool ResolveDft() {
+    if (g_dft.h) return true;
+    if (!g_api.h) return false;
+    WCHAR path[MAX_PATH];
+    if (!GetModuleFileNameW(g_api.h, path, MAX_PATH)) return false;
+    WCHAR* slash = wcsrchr(path, L'\\');
+    if (!slash) return false;
+    wcscpy_s(slash + 1, MAX_PATH - (slash + 1 - path), L"SPADefeature.dll");
+    HMODULE m = LoadLibraryW(path);
+    if (!m) { Log("SPADefeature.dll load failed %lu", GetLastError()); return false; }
+    g_dft.h = m;
+    g_dft.init = Res<pfn_dft_init>(m, SYM_DFT_INIT);
+    g_dft.run = Res<pfn_dft_run>(m, SYM_DFT_RUN);
+    g_dft.ctor = Res<pfn_obj_ctor>(m, SYM_DFT_CTOR);
+    g_dft.dtor = Res<pfn_obj_ctor>(m, SYM_DFT_DTOR);
+    g_dft.pause = Res<pfn_dft_flag>(m, SYM_DFT_PAUSE);
+    g_dft.holes = Res<pfn_dft_flag>(m, SYM_DFT_HOLES);
+    g_dft.chamfers = Res<pfn_dft_flag>(m, SYM_DFT_CHAMF);
+    g_dft.blends = Res<pfn_dft_flag>(m, SYM_DFT_BLEND);
+    g_dft.num = Res<pfn_dft_count>(m, SYM_DFT_NUM);
+    g_dft.get = Res<pfn_dft_get>(m, SYM_DFT_GET);
+    bool ok = g_dft.run && g_dft.ctor && g_dft.dtor && g_dft.pause &&
+              g_dft.holes && g_dft.num && g_dft.get;
+    Log("SPADefeature resolved=%d (init=%p run=%p get=%p)", ok, (void*)g_dft.init,
+        (void*)g_dft.run, (void*)g_dft.get);
+    return ok;
+}
+
+static bool Outcome(Api& a, outcome_slot& oc, int* errOut);
+static void Reply(const char* fmt, ...);
+static int CountFaces(Api& a, BODY* body);
+
+// Recognition only (pause_after_recognize): nothing is removed, so the body in
+// the CST part stays untouched. Writes a TSV report and replies with a summary.
+static void RunDft(const char* reportPath, bool allTypes) {
+    if (!g_body) { Reply("ERR no body; run restore first"); return; }
+    if (!ResolveDft()) { Reply("ERR SPADefeature.dll / symbols unavailable"); return; }
+    if (g_dft.init) {
+        outcome_slot o;
+        ZeroMemory(&o, sizeof(o));
+        g_dft.init();
+        int err = 0;
+        bool ok = Outcome(g_api, o, &err);
+        Log("api_initialize_defeature ok=%d errno=%d", ok, err);
+    }
+
+    void* opts = VirtualAlloc(nullptr, 8192, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!opts) { Reply("ERR oom"); return; }
+    g_dft.ctor(opts);
+
+    outcome_slot o;
+    int err = 0;
+    ZeroMemory(&o, sizeof(o));
+    g_dft.pause(opts, 1);
+    Outcome(g_api, o, &err);
+    ZeroMemory(&o, sizeof(o));
+    g_dft.holes(opts, 1);
+    Outcome(g_api, o, &err);
+    if (allTypes) {
+        if (g_dft.chamfers) { ZeroMemory(&o, sizeof(o)); g_dft.chamfers(opts, 1); Outcome(g_api, o, &err); }
+        if (g_dft.blends) { ZeroMemory(&o, sizeof(o)); g_dft.blends(opts, 1); Outcome(g_api, o, &err); }
+    }
+
+    DWORD t0 = GetTickCount();
+    ZeroMemory(&o, sizeof(o));
+    g_dft.run(g_body, opts, nullptr);
+    int runErr = 0;
+    bool ran = Outcome(g_api, o, &runErr);
+    DWORD ms = GetTickCount() - t0;
+    Log("api_find_and_remove_features ok=%d errno=%d ms=%lu", ran, runErr, ms);
+    if (!ran) {
+        g_dft.dtor(opts);
+        VirtualFree(opts, 0, MEM_RELEASE);
+        Reply("ERR api_find_and_remove_features errno=%d", runErr);
+        return;
+    }
+
+    int nf = g_dft.num(opts);
+    FILE* rep = _fsopen(reportPath, "w", _SH_DENYNO);
+    if (rep) {
+        fprintf(rep, "# index\ttype\tfaces\txmin\tymin\tzmin\txmax\tymax\tzmax\n");
+    }
+
+    int byType[8] = {0};
+    for (int i = 0; i < nf; i++) {
+        void* flist = VirtualAlloc(nullptr, 8192, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (!flist) break;
+        g_api.list_ctor(flist);
+        int type = -1;
+        ZeroMemory(&o, sizeof(o));
+        g_dft.get(opts, i, flist, &type);
+        int ferr = 0;
+        bool got = Outcome(g_api, o, &ferr);
+        int fc = got ? g_api.list_count(flist) : -1;
+        SPAposition lo(0, 0, 0), hi(0, 0, 0);
+        if (got && g_api.get_box) {
+            ZeroMemory(&o, sizeof(o));
+            g_api.get_box(flist, &lo, &hi, nullptr, nullptr);
+            Outcome(g_api, o, &ferr);
+        }
+        if (rep) {
+            fprintf(rep, "%d\t%d\t%d\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\n",
+                    i, type, fc, lo.x, lo.y, lo.z, hi.x, hi.y, hi.z);
+        }
+        if (type >= 0 && type < 8) byType[type]++;
+        g_api.list_dtor(flist);
+        VirtualFree(flist, 0, MEM_RELEASE);
+    }
+    if (rep) {
+        fprintf(rep, "# features=%d faces=%d ms=%lu mode=%s\n", nf, CountFaces(g_api, g_body), ms,
+                allTypes ? "all" : "holes");
+        fprintf(rep, "# count_by_type\t0=%d\t1=%d\t2=%d\t3=%d\n", byType[0], byType[1], byType[2], byType[3]);
+        fclose(rep);
+    }
+    g_dft.dtor(opts);
+    VirtualFree(opts, 0, MEM_RELEASE);
+
+    Reply("OK features=%d type0=%d type1=%d type2=%d type3=%d faces=%d ms=%lu report=%s",
+          nf, byType[0], byType[1], byType[2], byType[3], CountFaces(g_api, g_body), ms, reportPath);
 }
 
 static bool Outcome(Api& a, outcome_slot& oc, int* errOut) {
@@ -557,6 +710,21 @@ static void RunRequest(const char* line) {
         }
         return;
     }
+    if (strncmp(line, "dft ", 4) == 0) {
+        // dft <report.tsv> [all|holes]  -- recognition only, nothing is removed
+        char arg[512];
+        strncpy_s(arg, sizeof(arg), line + 4, _TRUNCATE);
+        bool allTypes = true;
+        char* sep = strchr(arg, ' ');
+        if (sep) {
+            *sep = 0;
+            const char* mode = sep + 1;
+            while (*mode == ' ') mode++;
+            if (_stricmp(mode, "holes") == 0) allTypes = false;
+        }
+        RunDft(arg, allTypes);
+        return;
+    }
     if (strncmp(line, "quit", 4) == 0) { Reply("OK bye"); return; }
 
     Reply("ERR unknown command: %.60s", line);
@@ -614,7 +782,7 @@ static bool ExecOnUiThread(const char* line) {
     ResetEvent(g_jobDone);
     InterlockedExchange(&g_jobPending, 1);
     PostThreadMessageW(g_uiTid, WM_NULL, 0, 0);
-    BOOL ok = WaitForSingleObject(g_jobDone, 20000) == WAIT_OBJECT_0;
+    BOOL ok = WaitForSingleObject(g_jobDone, 900000) == WAIT_OBJECT_0;
     LeaveCriticalSection(&g_lock);
     return ok == TRUE;
 }
@@ -698,4 +866,7 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
     }
     return TRUE;
 }
+
+
+
 

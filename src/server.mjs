@@ -536,7 +536,7 @@ const httpServer = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
 
   if (url.pathname === "/health") {
-    return sendJson(res, 200, { ok: true, tools: 12 });
+    return sendJson(res, 200, { ok: true, endpoint: '/mcp' });
   }
 
   if (url.pathname !== "/mcp") {

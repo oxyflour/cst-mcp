@@ -13,3 +13,5 @@ native/*.exp
 
 # generated symbol dumps and downloaded docs
 out/
+.run/
+
