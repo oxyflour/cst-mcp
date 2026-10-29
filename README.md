@@ -83,7 +83,9 @@ docs/architecture.md  为什么这么分层、注入方案怎么施工
 MCP client --HTTP--> server.mjs --stdin/stdout JSON--> cst_bridge.py --> CST DE
 ```
 
-## 工具
+## 工具（15 个）
+
+**VBA 层**（`cst.interface`，先 `cst_connect`）
 
 | 工具 | 作用 |
 |---|---|
@@ -91,9 +93,20 @@ MCP client --HTTP--> server.mjs --stdin/stdout JSON--> cst_bridge.py --> CST DE
 | `cst_connect` | 附着到已运行 DE（`any` 或 `pid`），不新开实例 |
 | `cst_open_project` | 打开 `.cst` |
 | `cst_vba` | 在活动项目的 history 里执行一段 VBA |
-| `cst_solve` | 异步启动求解器，立即返回 |
-| `cst_solver_state` | 求解器是否在跑、哪个 |
-| `cst_abort_solver` | 中止 |
+| `cst_solve` / `cst_solver_state` / `cst_abort_solver` | 求解器控制（启动是异步的，要轮询） |
+| `cst_import_step` | 读 `.stp/.step` |
+| `cst_export_sat` | 整个模型导出成 SAT |
+| `cst_local_modify` | 按面 ID 推拉（沿法向 offset / 按向量移动），CST 自动保持闭合 |
+
+**ACIS 层**（进程内直调，需要 `modeler_AMD64.exe`）
+
+| 工具 | 作用 |
+|---|---|
+| `acis_connect` | 连到 `\\.\pipe\cst-acis-<pid>`，未注入时**自动注入**；可重复调用 |
+| `acis_block` | 用 ACIS 建长方体 |
+| `acis_offset_face` | 偏置当前体的某个面，返回新体面数 |
+| `acis_export_sat` | 把体写成 `.sat`（`which=main` 原体 / `last` 偏置结果） |
+| `acis_import_sat` | 走 CST 的 `SAT.Read` 把文件读进项目 |
 
 桥里另有备用方法（`history.rebuild`、`solver.run`、`results.tree`、`project.activate`），需要时加一层 tool 包装即可。
 
@@ -111,29 +124,35 @@ MCP client --HTTP--> server.mjs --stdin/stdout JSON--> cst_bridge.py --> CST DE
 
 ```powershell
 $h = @{ 'content-type'='application/json'; 'accept'='application/json, text/event-stream' }
+# 列工具
 Invoke-RestMethod -Uri http://127.0.0.1:8765/mcp -Method Post -Headers $h -Body `
   '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+# 调一次（把 name/arguments 换掉即可）
+Invoke-RestMethod -Uri http://127.0.0.1:8765/mcp -Method Post -Headers $h -Body `
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"cst_status","arguments":{}}}'
 ```
 
 服务器是 stateless 模式：每个 POST 现建一个 transport，不发 `Mcp-Session-Id`，也不支持 `GET /mcp` 的 SSE 流（返回 405）。
+
+## 多 agent 共存
+
+CST 是单用户程序：两个进程同时驱动它会互相破坏（VBA 历史是全局的、modeler 只有一个 ACIS 实体管理器、DLL 注入两次会起两个管道服务）。所以本仓库用**单所有者模型**：
+
+```
+MCP 客户端 A (stdio) ─┐
+MCP 客户端 B (stdio) ─┼─► 所有者进程（唯一，持有 CST + ACIS + 请求队列）
+MCP 客户端 C (HTTP)  ─┘
+```
+
+- `--stdio` 现在只是**代理**：它先确认 8765 上有 `cst-mcp` 所有者（`/health` 里的 `app` 字段），没有就自己拉起一个，然后把 JSON-RPC 逐行转发过去。多个客户端因此共用同一个所有者，不会各起一份 Python 桥。
+- 端口已被别的程序占用时，所有者拒绝启动（`EADDRINUSE`，退出码 3），不会去抢。
+- `stop.ps1` 只杀 `/health` 里自报 `app: cst-mcp` 的进程，不会误杀别人；端口被陌生程序占住时会拒绝并要求 `-Force`。
 
 ## ACIS 模式（进程内直调）
 
 除了 VBA 层，还有一组工具直连 `modeler_AMD64.exe` 里的 ACIS 内核，能做 VBA 表达不了的直接建模（偏置面、推壳、变半径倒圆……）。
 
-前提：每次 CST 启动后手动注入一次代理（DLL 不能自动加载）：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File native\inject.ps1 -Dll native\cst_acis_agent2.dll
-```
-
-| 工具 | 作用 |
-|---|---|
-| `acis_connect` | 连到 `\\.\pipe\cst-acis-<pid>`，省略 pid 自动找 modeler |
-| `acis_block` | 用 ACIS 建一个长方体，返回面数 |
-| `acis_offset_face` | 偏置当前体的某个面（推拉），返回新体面数 |
-| `acis_export_sat` | 把体写成 `.sat`（`which=main` 原体 / `last` 偏置结果） |
-| `acis_import_sat` | 走 CST 的 `SAT.Read` 把文件读进项目 |
+代理**不需要手动注入**：第一次调 `acis_connect` 时，服务器会挑编号最大的 `native/cst_acis_agent*.dll` 注入到 modeler（首次约 30 秒，含注入等待）。
 
 已跑通的完整链路（全部通过 MCP 调用）：
 

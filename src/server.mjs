@@ -434,8 +434,8 @@ function buildServer() {
     {
       title: "Attach to the ACIS agent",
       description:
-        "Connect to the in-process ACIS agent inside modeler_AMD64.exe. The agent must have been injected " +
-        "beforehand (native/inject.ps1 -Dll cst_acis_agent.dll). Omit pid to pick the running modeler.",
+        "Connect to the in-process ACIS agent inside modeler_AMD64.exe. The agent is injected automatically " +
+        "on first use if it is missing. Omit pid to pick the running modeler. Calls are idempotent.",
       inputSchema: { pid: z.number().int().optional() },
     },
     async ({ pid }) => {
@@ -576,7 +576,7 @@ const httpServer = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
 
   if (url.pathname === "/health") {
-    return sendJson(res, 200, { ok: true, endpoint: '/mcp' });
+    return sendJson(res, 200, { ok: true, app: 'cst-mcp', pid: process.pid, endpoint: '/mcp' });
   }
 
   if (url.pathname !== "/mcp") {
@@ -622,22 +622,129 @@ const httpServer = http.createServer(async (req, res) => {
   }
 });
 
-// Two transports, same tools:
-//   --stdio  : the client spawns this process; nothing has to be pre-started.
-//   (default): long-lived HTTP endpoint for remote or multi-client use.
+// ---------------------------------------------------------------------------
+// Ownership model
+//
+// CST is a single-user application: two processes driving it at once corrupt
+// each other (VBA history is global, the modeler has one ACIS part, the DLL
+// cannot be injected twice). So exactly one "owner" process talks to CST, and
+// every client — HTTP or stdio — goes through it.
+//
+//   --owner / default : long-lived HTTP server; the one that owns CST + ACIS.
+//   --stdio           : thin proxy. Makes sure the owner exists, then forwards
+//                       JSON-RPC lines to it. Many of these can coexist.
+// ---------------------------------------------------------------------------
 const USE_STDIO = process.argv.includes("--stdio") || process.env.CST_MCP_TRANSPORT === "stdio";
+const MCP_URL = `http://${CONFIG.host}:${CONFIG.port}/mcp`;
+
+async function ownerHealth(timeoutMs = 1500) {
+  try {
+    const res = await fetch(`http://${CONFIG.host}:${CONFIG.port}/health`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return null;
+    const body = await res.json();
+    return body.app === "cst-mcp" ? body : null;
+  } catch {
+    return null;
+  }
+}
+
+async function ensureOwner() {
+  const up = await ownerHealth();
+  if (up) return up;
+
+  const log = (m) => process.stderr.write(`[cst-mcp] ${m}\n`);
+  log("no owner on this port, starting one");
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url)], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+    env: { ...process.env, CST_MCP_TRANSPORT: "http" },
+  });
+  child.unref();
+
+  const deadline = Date.now() + 25000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 300));
+    const health = await ownerHealth(800);
+    if (health) return health;
+  }
+  throw new Error(`owner did not come up on port ${CONFIG.port}`);
+}
 
 if (USE_STDIO) {
-  const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
-  const server = buildServer();
-  // stdout carries the protocol; diagnostics must go to stderr only.
-  const log = (msg) => process.stderr.write(`[cst-mcp] ${msg}\n`);
-  log(`stdio transport, bridge python: ${CONFIG.python}`);
-  await server.connect(new StdioServerTransport());
+  // Thin proxy: stdin line -> POST /mcp -> stdout line. Notifications (no id)
+  // are forwarded without expecting a body.
+  const log = (m) => process.stderr.write(`[cst-mcp] ${m}\n`);
+  await ensureOwner();
+  log(`stdio proxy -> ${MCP_URL}`);
+
+  let buf = "";
+  let pending = 0;
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", async (chunk) => {
+    buf += chunk;
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      pending++;
+      try {
+        const res = await fetch(MCP_URL, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json, text/event-stream",
+          },
+          body: line,
+        });
+        const text = await res.text();
+        if (!text) continue;
+        const parsed = JSON.parse(text);
+        if (parsed && parsed.id !== undefined && parsed.id !== null) {
+          process.stdout.write(JSON.stringify(parsed) + "\n");
+        }
+      } catch (err) {
+        const id = (() => { try { return JSON.parse(line).id ?? null; } catch { return null; } })();
+        process.stdout.write(
+          JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32603, message: String(err) } }) + "\n",
+        );
+      } finally {
+        pending--;
+      }
+    }
+  });
+  // Drain in-flight requests before exiting: a piped stdin closes immediately.
+  process.stdin.on("end", async () => {
+    const deadline = Date.now() + 10000;
+    while (pending > 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+    process.exit(0);
+  });
 } else {
   httpServer.listen(CONFIG.port, CONFIG.host, () => {
-    console.log(`[cst-mcp] listening on http://${CONFIG.host}:${CONFIG.port}/mcp`);
+    console.log(`[cst-mcp] owner on http://${CONFIG.host}:${CONFIG.port}/mcp (pid ${process.pid})`);
     console.log(`[cst-mcp] bridge python: ${CONFIG.python}`);
+    // Record ownership so start.ps1 / stop.ps1 can tell our owner from a
+    // stranger listening on the same port.
+    try {
+      const dir = path.join(ROOT, ".run");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, "server.json"),
+        JSON.stringify({ pid: process.pid, port: CONFIG.port, url: MCP_URL, startedAt: new Date().toISOString() }, null, 2),
+      );
+    } catch {
+      /* state file is best-effort */
+    }
+  });
+  httpServer.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`[cst-mcp] port ${CONFIG.port} is taken by another process; not starting a second owner`);
+      process.exit(3);
+    }
+    throw err;
   });
 }
 

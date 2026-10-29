@@ -33,7 +33,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:\Projects\cst-mcp\start.ps
 http://127.0.0.1:8765/mcp      # 客户端配置 {"type":"http","url":"..."}
 ```
 
-`start.ps1` 幂等；`stop.ps1` 关闭。判断是否在跑：`GET /health` 返回 `{"ok":true,...}`。
+`start.ps1` 幂等；`stop.ps1` 关闭。判断是否在跑：`GET /health` 返回 `{"ok":true,"app":"cst-mcp",...}`。
+
+## 多个 agent 共用（重要）
+
+CST 是单用户程序，**只能有一个进程驱动它**。所以本仓库是单所有者模型：
+
+- 所有客户端（stdio 或 HTTP）都走**同一个所有者进程**，由它独占 CST 连接和 ACIS 管道。
+- `--stdio` 只是代理：找不到所有者就自己拉起一个，然后把请求转发过去。**多开无害**。
+- 端口被别的程序占用时所有者拒绝启动；`stop.ps1` 只杀自报 `app: cst-mcp` 的进程，不会误杀。
+- 不要自己再起第二个 HTTP 所有者，也不要直接跑 `node src/server.mjs` 去抢同一个端口。
 
 ## 前置条件
 
@@ -41,7 +50,7 @@ http://127.0.0.1:8765/mcp      # 客户端配置 {"type":"http","url":"..."}
 |---|---|
 | CST 2022 | 装在 `C:\Programs\CST Studio Suite 2022`（路径写死在 `bridge/cst_bridge.py` 与 `CONFIG.python`） |
 | Node ≥ 20 | 已 `npm install`（`start.ps1` 会自动补） |
-| ACIS 代理 | **不需要手动注入**：首次调用 `acis_connect` 时服务器会自动找最新的 `native/cst_acis_agent*.dll` 注入到 `modeler_AMD64.exe` |
+| ACIS 代理 | **不需要手动注入**：首次调用 `acis_connect` 时服务器会自动找最新的 `native/cst_acis_agent*.dll` 注入到 `modeler_AMD64.exe`（首次约 30 秒，之后秒回） |
 | CST 3D 项目 | ACIS 工具要求 `modeler_AMD64.exe` 在跑（CST 里打开一个 3D 项目） |
 
 ## 工具（15 个）

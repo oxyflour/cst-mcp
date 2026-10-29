@@ -41,11 +41,19 @@ function Wait-Health([int]$port, [int]$timeoutSec = 20) {
 
 # ---------------------------------------------------------------- server
 
-$existing = $null
-try { $existing = (Invoke-WebRequest -Uri "http://127.0.0.1:$Port/health" -UseBasicParsing -TimeoutSec 2).Content } catch { }
+# Ownership check: only reuse a server that identifies itself as cst-mcp.
+function Get-Owner([int]$p) {
+    try { return (Invoke-WebRequest -Uri "http://127.0.0.1:$p/health" -UseBasicParsing -TimeoutSec 2).Content | ConvertFrom-Json }
+    catch { return $null }
+}
 
-if ($existing) {
-    Write-Host "server already running on port $Port : $existing"
+$owner = Get-Owner $Port
+if ($owner -and $owner.app -ne 'cst-mcp') {
+    throw "port $Port is held by another application ($($owner | ConvertTo-Json -Compress)); pick another port with -Port"
+}
+
+if ($owner) {
+    Write-Host "owner already running on port $Port (pid $($owner.pid))"
 } else {
     if (-not (Test-Path (Join-Path $root 'node_modules'))) {
         Write-Host 'installing node dependencies...'
@@ -124,9 +132,11 @@ if ($WithCst) {
         }
 
         if ($agentDll) {
-            $loaded = ($modeler.Modules | Where-Object { $_.ModuleName -eq $agentDll.Name })
+            # Any agent build in the modeler is enough: injecting a second,
+            # differently-named copy would start a competing pipe server.
+            $loaded = ($modeler.Modules | Where-Object { $_.ModuleName -like 'cst_acis_agent*.dll' })
             if ($loaded) {
-                Write-Host "agent already loaded in modeler $modelerPid"
+                Write-Host "agent already loaded in modeler $modelerPid : $($loaded[0].ModuleName)"
             } else {
                 powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'native\inject.ps1') `
                            -ProcessId $modelerPid -Dll $agentDll.FullName | Out-Null

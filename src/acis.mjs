@@ -40,6 +40,11 @@ export class AcisPipe {
   }
 
   connect(pid) {
+    // Idempotent: the agent serves one connection at a time, so opening a
+    // second socket to the same modeler blocks until the 30 s timeout.
+    if (this.#socket && this.#pid === pid) return Promise.resolve(pid);
+    if (this.#socket) this.close();
+
     return new Promise((resolve, reject) => {
       const sock = net.connect(`\\\\.\\pipe\\cst-acis-${pid}`);
       const onError = (err) => {

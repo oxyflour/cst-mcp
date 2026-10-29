@@ -70,6 +70,10 @@ def m_de_connect(params):
     else:
         raise ValueError("unknown mode: %r" % (mode,))
 
+    try:
+        de.set_quiet_mode(True)   # documented as step one: modal dialogs would hang every later call
+    except Exception:
+        pass
     STATE["de"] = de
     return {"pid": de.pid(), "version": ci.DesignEnvironment.version()}
 

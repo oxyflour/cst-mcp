@@ -9,7 +9,8 @@
 [CmdletBinding()]
 param(
     [int] $Port = 8765,
-    [switch] $WithCst
+    [switch] $WithCst,
+    [switch] $Force
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,12 +27,20 @@ if (Test-Path $pidFile) {
     Write-Host 'no pid file; nothing to stop'
 }
 
-# safety net: whoever is listening on the port
-$conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($conn) {
-    Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
-    Write-Host "port $Port released (pid $($conn.OwningProcess))"
+# Safety net, but only for our own server: never kill an unrelated process that
+# happens to hold the port.
+$health = $null
+try { $health = (Invoke-WebRequest -Uri "http://127.0.0.1:$Port/health" -UseBasicParsing -TimeoutSec 2).Content | ConvertFrom-Json } catch { }
+if ($health -and $health.app -eq 'cst-mcp') {
+    Stop-Process -Id $health.pid -Force -ErrorAction SilentlyContinue
+    Write-Host "port $Port released (pid $($health.pid))"
+} elseif ($health -and -not $Force) {
+    Write-Host "port $Port is held by '$($health.app)', refusing to kill it (use -Force)" -ForegroundColor Yellow
+} elseif ($health) {
+    Stop-Process -Id $health.pid -Force -ErrorAction SilentlyContinue
+    Write-Host "force-released port $Port (pid $($health.pid))"
 }
+Remove-Item (Join-Path $run 'server.json') -ErrorAction SilentlyContinue
 
 if ($WithCst) {
     $cst = Get-Process -Name 'CST DESIGN*' -ErrorAction SilentlyContinue | Select-Object -First 1
