@@ -1,0 +1,19 @@
+{
+  "name": "cst-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Model Context Protocol server for CST Studio Suite 2022",
+  "main": "src/server.mjs",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "probe": "\"C:\\Programs\\CST Studio Suite 2022\\AMD64\\python\\python.exe\" scripts\\probe_cst.py"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "^3.25.76"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

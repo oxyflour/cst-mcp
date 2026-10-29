@@ -1,0 +1,15 @@
+node_modules/
+*.log
+*.tmp
+.cache/
+
+# MSVC build output
+native/*.dll
+native/*.obj
+native/*.exe
+native/*.lib
+native/*.pdb
+native/*.exp
+
+# generated symbol dumps and downloaded docs
+out/
