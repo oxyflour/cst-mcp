@@ -15,3 +15,6 @@ native/*.exp
 out/
 .run/
 
+# large CAD fixtures
+models/*.sat
+
