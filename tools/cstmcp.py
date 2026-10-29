@@ -25,6 +25,7 @@ import ctypes
 import ctypes.wintypes as wt
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -229,7 +230,7 @@ def http_json(url, payload=None, timeout=3):
         return json.loads(res.read().decode() or "null")
 
 
-def health(port, timeout=1.5):
+def health(port, timeout=0.8):
     try:
         h = http_json("http://127.0.0.1:%d/health" % port, timeout=timeout)
         return h if h and h.get("app") == "cst-mcp" else None
@@ -321,18 +322,39 @@ def cmd_symbols(args):
     return 1 if missing else 0
 # ------------------------------------------------------------------- commands
 
+
+def known_ports():
+    """Ports worth probing: the default one plus every recorded owner.
+
+    Scanning the whole 8770-8799 range made `status` block for up to a minute
+    when a port silently dropped packets instead of refusing.
+    """
+    ports = {DEFAULT_PORT}
+    if os.path.isdir(RUN):
+        for name in os.listdir(RUN):
+            m = re.match(r"owner-(\d+)\.json$", name)
+            if m:
+                ports.add(int(m.group(1)))
+    return sorted(ports)
+
+
 def cmd_status(args):
     print("owner(s):")
     found = False
-    for port in [DEFAULT_PORT] + list(ISOLATED_PORTS):
+    for port in known_ports():
         h = health(port)
         if h:
             found = True
             state = os.path.join(RUN, "owner-%d.json" % port)
             extra = ""
             if os.path.isfile(state):
-                extra = json.load(open(state))
-                extra = " de=%s modeler=%s" % (extra.get("dePid"), extra.get("modelerPid"))
+                st = json.load(open(state))
+                live = {p[0] for p in processes()}
+                de, md = st.get("dePid"), st.get("modelerPid")
+                dead = [name for name, pid in (("DE", de), ("modeler", md)) if pid and pid not in live]
+                extra = " de=%s modeler=%s" % (de, md)
+                if dead:
+                    extra += "  <-- %s gone, restart with `up --isolated`" % "/".join(dead)
             print("  :%d pid=%s%s" % (port, h.get("pid"), extra))
     if not found:
         print("  none")
@@ -449,8 +471,24 @@ def cmd_up(args):
 
     h = health(port)
     if h:
-        print(json.dumps({"port": port, "pid": h["pid"], "reused": True, "stack": stack}))
-        return 0
+        # A live owner can be pinned to a stack that has died (CST closed or a
+        # modeler crash). Reusing it would hand back a server that cannot talk
+        # to anything, so restart it in that case.
+        state_path = os.path.join(RUN, "owner-%d.json" % port)
+        stale = None
+        if os.path.isfile(state_path):
+            st = json.load(open(state_path))
+            live = {p[0] for p in processes()}
+            if st.get("dePid") and st["dePid"] not in live:
+                stale = "DE %s" % st["dePid"]
+            elif st.get("modelerPid") and st["modelerPid"] not in live:
+                stale = "modeler %s" % st["modelerPid"]
+        if not stale:
+            print(json.dumps({"port": port, "pid": h["pid"], "reused": True, "stack": stack}))
+            return 0
+        print("owner on :%d had lost its %s; restarting" % (port, stale))
+        kill(int(h["pid"]))
+        time.sleep(0.5)
 
     os.makedirs(RUN, exist_ok=True)
     out = os.path.join(RUN, "server-%d.out.log" % port)
@@ -489,8 +527,13 @@ def cmd_up(args):
     return 0
 
 
+def cmd_close_de(args):
+    close_de(args.pid)
+    return 0
+
+
 def cmd_down(args):
-    ports = [args.port] if args.port else [DEFAULT_PORT] + list(ISOLATED_PORTS)
+    ports = [args.port] if args.port else known_ports()
     stopped = 0
     for port in ports:
         h = health(port)
@@ -549,6 +592,9 @@ def main(argv=None):
     p.add_argument("--modeler-pid", type=int, default=0, help="pin to that DE's modeler")
     p.add_argument("--token")
 
+    p = sub.add_parser("close-de", help="close one Design Environment")
+    p.add_argument("pid", type=int)
+
     p = sub.add_parser("down", help="stop owner(s)")
     p.add_argument("--port", type=int)
     p.add_argument("--with-cst", action="store_true", help="also close the isolated DE")
@@ -556,7 +602,7 @@ def main(argv=None):
 
     args = ap.parse_args(argv)
     return {"status": cmd_status, "symbols": cmd_symbols, "inject": cmd_inject, "isolate": cmd_isolate,
-            "up": cmd_up, "down": cmd_down}[args.cmd](args)
+            "up": cmd_up, "down": cmd_down, "close-de": cmd_close_de}[args.cmd](args)
 
 
 if __name__ == "__main__":

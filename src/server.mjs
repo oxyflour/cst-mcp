@@ -688,8 +688,8 @@ if (ISOLATED && USE_STDIO) {
   const log = (m) => process.stderr.write(`[cst-mcp] ${m}\n`);
   log("isolated mode: starting a private CST stack");
   const { stdout } = await execFileAsync(
-    "powershell",
-    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(ROOT, "scripts", "isolate.ps1")],
+    PYTHON,
+    [...PYTHON_ARGS, path.join(ROOT, "tools", "cstmcp.py"), "isolate"],
     { windowsHide: true, maxBuffer: 1 << 20 },
   );
   const line = stdout.trim().split(/\r?\n/).filter(Boolean).pop();
