@@ -2,7 +2,19 @@
 
 CST Studio Suite 2022 的 MCP 服务器（Streamable HTTP）。设计取舍与"要不要注入 DLL"的分析见 [docs/architecture.md](docs/architecture.md)。
 
-## 快速启动
+## 给其他 agent 用
+
+客户端配置（仓库里的 `.mcp.json` 就是这段），**客户端启动时自己拉起进程，不需要预先开任何东西**：
+
+```json
+{ "mcpServers": { "cst": { "type": "stdio", "command": "node", "args": ["C:/Projects/cst-mcp/src/server.mjs", "--stdio"] } } }
+```
+
+ACIS 代理也不用手动注入：第一次调 `acis_connect` 时，服务器自己找最新的 `native/cst_acis_agent*.dll` 注入到 `modeler_AMD64.exe`。
+
+完整接入说明、工具清单、已知坑见 [AGENTS.md](AGENTS.md)。
+
+## 快速启动（HTTP 模式）
 
 **一条命令**，开服务器 + 开 CST + 注入 ACIS 代理：
 
