@@ -57,6 +57,15 @@ typedef ENTITY* (__cdecl* pfn_list_at)(const void*, int);
 typedef outcome_slot(__cdecl* pfn_restore_list)(void*, int, void*, AcisOptions*);
 // api_tweak_faces(int, FACE**, SURFACE**, int*, SPAposition /*by value*/, void* /*back-ref, scalar*/, AcisOptions*)
 typedef outcome_slot(__cdecl* pfn_api_tweak_faces)(int, FACE**, SURFACE**, int*, SPAposition, void*, AcisOptions*);
+typedef const char* (__cdecl* pfn_err_text)(int);
+// api_detect_depression/protrusion(const ENTITY*, ENTITY_LIST&, const detect_feature_options*)
+typedef outcome_slot(__cdecl* pfn_detect_dp)(const ENTITY*, void*, const void*);
+// api_detect_blends/chamfers(const FACE*, ENTITY_LIST&, <element type enum>, const detect_feature_options*)
+typedef outcome_slot(__cdecl* pfn_detect_bc)(const FACE*, void*, int, const void*);
+#define SYM_DETECT_DEP "?api_detect_depression@@YA?AVoutcome@@PEBVENTITY@@AEAVENTITY_LIST@@PEBVdetect_feature_options@@@Z"
+#define SYM_DETECT_PROT "?api_detect_protrusion@@YA?AVoutcome@@PEBVENTITY@@AEAVENTITY_LIST@@PEBVdetect_feature_options@@@Z"
+#define SYM_DETECT_BLEND "?api_detect_blends@@YA?AVoutcome@@PEBVFACE@@AEAVENTITY_LIST@@W4blend_element_type@@PEBVdetect_feature_options@@@Z"
+#define SYM_DETECT_CHAMF "?api_detect_chamfers@@YA?AVoutcome@@PEBVFACE@@AEAVENTITY_LIST@@W4chamfer_element_type@@PEBVdetect_feature_options@@@Z"
 typedef outcome_slot(__cdecl* pfn_get_box)(const void*, SPAposition*, SPAposition*, void*, AcisOptions*);
 typedef outcome_slot(__cdecl* pfn_tweak2)(int, FACE**, SURFACE**, int*, const SPAposition*, void*, void*, AcisOptions*);
 typedef void (__cdecl* pfn_obj_ctor)(void*);
@@ -136,6 +145,9 @@ struct Api {
     pfn_restore_list restore_list;
     pfn_api_tweak_faces tweak_faces;
     pfn_get_box get_box;
+    pfn_err_text err_ident, err_mess;
+    pfn_detect_dp detect_dep, detect_prot;
+    pfn_detect_bc detect_blend, detect_chamf;
     pfn_tweak2 tweak2;
     pfn_tweak_init tweak_init;
     pfn_move_faces move_faces;
@@ -173,6 +185,12 @@ static bool ResolveAll(Api& a) {
     a.restore_list = Res<pfn_restore_list>(a.h, SYM_RESTORE_LIST);
     a.tweak_faces = Res<pfn_api_tweak_faces>(a.h, SYM_TWEAK_FACES);
     a.get_box = Res<pfn_get_box>(a.h, SYM_GET_BOX);
+    a.err_ident = Res<pfn_err_text>(a.h, "?find_err_ident@@YAPEBDH@Z");
+    a.err_mess = Res<pfn_err_text>(a.h, "?find_err_mess@@YAPEBDH@Z");
+    a.detect_dep = Res<pfn_detect_dp>(a.h, SYM_DETECT_DEP);
+    a.detect_prot = Res<pfn_detect_dp>(a.h, SYM_DETECT_PROT);
+    a.detect_blend = Res<pfn_detect_bc>(a.h, SYM_DETECT_BLEND);
+    a.detect_chamf = Res<pfn_detect_bc>(a.h, SYM_DETECT_CHAMF);
     a.tweak2 = Res<pfn_tweak2>(a.h, SYM_TWEAK_FACES2);
     a.tweak_init = Res<pfn_tweak_init>(a.h, SYM_TWEAK_INIT);
     a.move_faces = Res<pfn_move_faces>(a.h, SYM_MOVE_FACES);
@@ -228,7 +246,7 @@ static void RunDft(const char* reportPath, bool allTypes) {
     if (g_dft.init) {
         outcome_slot o;
         ZeroMemory(&o, sizeof(o));
-        g_dft.init();
+        o = g_dft.init();
         int err = 0;
         bool ok = Outcome(g_api, o, &err);
         Log("api_initialize_defeature ok=%d errno=%d", ok, err);
@@ -241,19 +259,19 @@ static void RunDft(const char* reportPath, bool allTypes) {
     outcome_slot o;
     int err = 0;
     ZeroMemory(&o, sizeof(o));
-    g_dft.pause(opts, 1);
+    o = g_dft.pause(opts, 1);
     Outcome(g_api, o, &err);
     ZeroMemory(&o, sizeof(o));
-    g_dft.holes(opts, 1);
+    o = g_dft.holes(opts, 1);
     Outcome(g_api, o, &err);
     if (allTypes) {
-        if (g_dft.chamfers) { ZeroMemory(&o, sizeof(o)); g_dft.chamfers(opts, 1); Outcome(g_api, o, &err); }
-        if (g_dft.blends) { ZeroMemory(&o, sizeof(o)); g_dft.blends(opts, 1); Outcome(g_api, o, &err); }
+        if (g_dft.chamfers) { ZeroMemory(&o, sizeof(o)); o = g_dft.chamfers(opts, 1); Outcome(g_api, o, &err); }
+        if (g_dft.blends) { ZeroMemory(&o, sizeof(o)); o = g_dft.blends(opts, 1); Outcome(g_api, o, &err); }
     }
 
     DWORD t0 = GetTickCount();
     ZeroMemory(&o, sizeof(o));
-    g_dft.run(g_body, opts, nullptr);
+    o = g_dft.run(g_body, opts, nullptr);
     int runErr = 0;
     bool ran = Outcome(g_api, o, &runErr);
     DWORD ms = GetTickCount() - t0;
@@ -261,7 +279,9 @@ static void RunDft(const char* reportPath, bool allTypes) {
     if (!ran) {
         g_dft.dtor(opts);
         VirtualFree(opts, 0, MEM_RELEASE);
-        Reply("ERR api_find_and_remove_features errno=%d", runErr);
+        Reply("ERR api_find_and_remove_features errno=%d %s: %s", runErr,
+              g_api.err_ident ? g_api.err_ident(runErr) : "?",
+              g_api.err_mess ? g_api.err_mess(runErr) : "?");
         return;
     }
 
@@ -278,14 +298,14 @@ static void RunDft(const char* reportPath, bool allTypes) {
         g_api.list_ctor(flist);
         int type = -1;
         ZeroMemory(&o, sizeof(o));
-        g_dft.get(opts, i, flist, &type);
+        o = g_dft.get(opts, i, flist, &type);
         int ferr = 0;
         bool got = Outcome(g_api, o, &ferr);
         int fc = got ? g_api.list_count(flist) : -1;
         SPAposition lo(0, 0, 0), hi(0, 0, 0);
         if (got && g_api.get_box) {
             ZeroMemory(&o, sizeof(o));
-            g_api.get_box(flist, &lo, &hi, nullptr, nullptr);
+            o = g_api.get_box(flist, &lo, &hi, nullptr, nullptr);
             Outcome(g_api, o, &ferr);
         }
         if (rep) {
@@ -322,7 +342,7 @@ static int CountFaces(Api& a, BODY* body) {
     a.list_ctor(list);
     outcome_slot oc;
     ZeroMemory(&oc, sizeof(oc));
-    a.get_faces((ENTITY*)body, (ENTITY_LIST*)list, 0, nullptr);
+    oc = a.get_faces((ENTITY*)body, (ENTITY_LIST*)list, 0, nullptr);
     int ok = a.ok(&oc);
     a.dtor(&oc);
     int n = ok ? a.list_count(list) : -1;
@@ -416,7 +436,7 @@ static void RunRequest(const char* line) {
         BODY* body = nullptr;
         outcome_slot oc;
         ZeroMemory(&oc, sizeof(oc));
-        g_api.solid_block(&lo, &hi, &body, nullptr);
+        oc = g_api.solid_block(&lo, &hi, &body, nullptr);
         int err = 0;
         bool ok = Outcome(g_api, oc, &err);
         if (!ok || !body) { Reply("ERR api_solid_block errno=%d", err); return; }
@@ -443,7 +463,7 @@ static void RunRequest(const char* line) {
         g_api.list_ctor(list);
         outcome_slot oc;
         ZeroMemory(&oc, sizeof(oc));
-        g_api.get_faces((ENTITY*)g_body, (ENTITY_LIST*)list, 0, nullptr);
+        oc = g_api.get_faces((ENTITY*)g_body, (ENTITY_LIST*)list, 0, nullptr);
         int err = 0;
         bool ok = Outcome(g_api, oc, &err);
         int n = ok ? g_api.list_count(list) : 0;
@@ -458,7 +478,7 @@ static void RunRequest(const char* line) {
         BODY* out = nullptr;
         outcome_slot oc2;
         ZeroMemory(&oc2, sizeof(oc2));
-        g_api.offset_face((FACE*)face, dist, &out, nullptr);
+        oc2 = g_api.offset_face((FACE*)face, dist, &out, nullptr);
         bool ok2 = Outcome(g_api, oc2, &err);
         g_api.list_dtor(list);
         VirtualFree(list, 0, MEM_RELEASE);
@@ -483,8 +503,8 @@ static void RunRequest(const char* line) {
 
     if (strncmp(line, "initlop", 7) == 0) {
         int r1 = -1, r2 = -1;
-        if (g_api.init_local_ops) { outcome_slot o; ZeroMemory(&o, sizeof(o)); g_api.init_local_ops(); r1 = g_api.ok(&o); g_api.dtor(&o); }
-        if (g_api.init_lopt_ops) { outcome_slot o; ZeroMemory(&o, sizeof(o)); g_api.init_lopt_ops(); r2 = g_api.ok(&o); g_api.dtor(&o); }
+        if (g_api.init_local_ops) { outcome_slot o; ZeroMemory(&o, sizeof(o)); o = g_api.init_local_ops(); r1 = g_api.ok(&o); g_api.dtor(&o); }
+        if (g_api.init_lopt_ops) { outcome_slot o; ZeroMemory(&o, sizeof(o)); o = g_api.init_lopt_ops(); r2 = g_api.ok(&o); g_api.dtor(&o); }
         Reply("OK local_ops=%d lopt_ops=%d", r1, r2);
         return;
     }
@@ -499,7 +519,7 @@ static void RunRequest(const char* line) {
         if (!flist) { Reply("ERR oom"); return; }
         g_api.list_ctor(flist);
         outcome_slot oc; ZeroMemory(&oc, sizeof(oc));
-        g_api.get_faces((ENTITY*)g_body, (ENTITY_LIST*)flist, 0, nullptr);
+        oc = g_api.get_faces((ENTITY*)g_body, (ENTITY_LIST*)flist, 0, nullptr);
         int err = 0; bool ok = Outcome(g_api, oc, &err);
         int n = ok ? g_api.list_count(flist) : 0;
         if (!ok || index < 0 || index >= n) { Reply("ERR bad face index %d (n=%d)", index, n); return; }
@@ -521,7 +541,7 @@ static void RunRequest(const char* line) {
 
         SPAposition lo(-1e4, -1e4, -1e4), hi(1e4, 1e4, 1e4);
         outcome_slot oc2; ZeroMemory(&oc2, sizeof(oc2));
-        g_api.move_faces(1, faces, tr, &lo, &hi, &hi, nullptr);
+        oc2 = g_api.move_faces(1, faces, tr, &lo, &hi, &hi, nullptr);
         bool ok2 = Outcome(g_api, oc2, &err);
         Reply(ok2 ? "OK faces=%d" : "ERR api_move_faces errno=%d faces=%d",
               ok2 ? CountFaces(g_api, g_body) : err, ok2 ? 0 : CountFaces(g_api, g_body));
@@ -538,7 +558,7 @@ static void RunRequest(const char* line) {
         g_api.list_ctor(flist);
         outcome_slot oc;
         ZeroMemory(&oc, sizeof(oc));
-        g_api.get_faces((ENTITY*)g_body, (ENTITY_LIST*)flist, 0, nullptr);
+        oc = g_api.get_faces((ENTITY*)g_body, (ENTITY_LIST*)flist, 0, nullptr);
         int err = 0;
         bool ok = Outcome(g_api, oc, &err);
         int n = ok ? g_api.list_count(flist) : 0;
@@ -552,7 +572,7 @@ static void RunRequest(const char* line) {
 
         outcome_slot oc2;
         ZeroMemory(&oc2, sizeof(oc2));
-        g_api.move_faces(1, faces, transf, &from, &to, &zero, nullptr);
+        oc2 = g_api.move_faces(1, faces, transf, &from, &to, &zero, nullptr);
         bool ok2 = Outcome(g_api, oc2, &err);
         Reply(ok2 ? "OK faces=%d" : "ERR api_move_faces errno=%d faces=%d",
               ok2 ? CountFaces(g_api, g_body) : err, ok2 ? 0 : CountFaces(g_api, g_body));
@@ -574,7 +594,7 @@ static void RunRequest(const char* line) {
 
         outcome_slot oc;
         ZeroMemory(&oc, sizeof(oc));
-        g_api.get_faces((ENTITY*)g_body, (ENTITY_LIST*)flist, 0, nullptr);
+        oc = g_api.get_faces((ENTITY*)g_body, (ENTITY_LIST*)flist, 0, nullptr);
         int err = 0;
         bool ok = Outcome(g_api, oc, &err);
         int n = ok ? g_api.list_count(flist) : 0;
@@ -587,7 +607,7 @@ static void RunRequest(const char* line) {
         SPAposition delta(dx, dy, dz);
         outcome_slot oc2;
         ZeroMemory(&oc2, sizeof(oc2));
-        g_api.tweak_init(1, faces, nullptr, nullptr, inList, &delta, outList, nullptr, nullptr);
+        oc2 = g_api.tweak_init(1, faces, nullptr, nullptr, inList, &delta, outList, nullptr, nullptr);
         bool ok2 = Outcome(g_api, oc2, &err);
         int affected = g_api.list_count(outList);
         Reply(ok2 ? "OK affected=%d faces=%d" : "ERR api_tweak_faces_init errno=%d",
@@ -605,7 +625,7 @@ static void RunRequest(const char* line) {
         g_api.list_ctor(list);
         outcome_slot oc;
         ZeroMemory(&oc, sizeof(oc));
-        g_api.get_faces((ENTITY*)g_body, (ENTITY_LIST*)list, 0, nullptr);
+        oc = g_api.get_faces((ENTITY*)g_body, (ENTITY_LIST*)list, 0, nullptr);
         int err = 0;
         bool ok = Outcome(g_api, oc, &err);
         int n = ok ? g_api.list_count(list) : 0;
@@ -624,7 +644,7 @@ static void RunRequest(const char* line) {
         outcome_slot oc2;
         ZeroMemory(&oc2, sizeof(oc2));
         g_api.lop_ctor(lop);
-        g_api.tweak2(1, faces, nullptr, nullptr, &delta, nullptr, lop, nullptr);
+        oc2 = g_api.tweak2(1, faces, nullptr, nullptr, &delta, nullptr, lop, nullptr);
         bool ok2 = Outcome(g_api, oc2, &err);
         if (g_api.lop_dtor) g_api.lop_dtor(lop);
         VirtualFree(lop, 0, MEM_RELEASE);
@@ -640,7 +660,7 @@ static void RunRequest(const char* line) {
         SPAposition lo, hi;
         outcome_slot oc;
         ZeroMemory(&oc, sizeof(oc));
-        g_api.get_box((const void*)list, &lo, &hi, nullptr, nullptr);
+        oc = g_api.get_box((const void*)list, &lo, &hi, nullptr, nullptr);
         int err = 0;
         bool ok = Outcome(g_api, oc, &err);
         g_api.list_dtor(list);
@@ -661,7 +681,7 @@ static void RunRequest(const char* line) {
         g_api.list_ctor(list);
         outcome_slot oc;
         ZeroMemory(&oc, sizeof(oc));
-        g_api.get_faces((ENTITY*)g_body, (ENTITY_LIST*)list, 0, nullptr);
+        oc = g_api.get_faces((ENTITY*)g_body, (ENTITY_LIST*)list, 0, nullptr);
         int err = 0;
         bool ok = Outcome(g_api, oc, &err);
         int n = ok ? g_api.list_count(list) : 0;
@@ -678,7 +698,7 @@ static void RunRequest(const char* line) {
         SPAposition delta(dx, dy, dz);
         outcome_slot oc2;
         ZeroMemory(&oc2, sizeof(oc2));
-        g_api.tweak_faces(1, faces, nullptr, nullptr, delta, nullptr, nullptr);
+        oc2 = g_api.tweak_faces(1, faces, nullptr, nullptr, delta, nullptr, nullptr);
         bool ok2 = Outcome(g_api, oc2, &err);
         int after = CountFaces(g_api, g_body);
         Reply(ok2 ? "OK faces=%d" : "ERR api_tweak_faces errno=%d faces=%d", ok2 ? after : err, ok2 ? 0 : after);
@@ -694,7 +714,7 @@ static void RunRequest(const char* line) {
         g_api.list_ctor(list);
         outcome_slot oc;
         ZeroMemory(&oc, sizeof(oc));
-        g_api.restore_list(f, 1, list, nullptr);
+        oc = g_api.restore_list(f, 1, list, nullptr);
         int err = 0;
         bool ok = Outcome(g_api, oc, &err);
         int n = ok ? g_api.list_count(list) : -1;
@@ -723,6 +743,68 @@ static void RunRequest(const char* line) {
             if (_stricmp(mode, "holes") == 0) allTypes = false;
         }
         RunDft(arg, allTypes);
+        return;
+    }
+    if (strncmp(line, "detect ", 7) == 0) {
+        // detect <dep|prot|blend|chamfer> <faceIndex> [elemType]
+        // faceIndex -1 seeds dep/prot with the whole body. Replies with the
+        // indices (in api_get_faces order) of the faces in the detected set.
+        if (!g_body) { Reply("ERR no body; run restore first"); return; }
+        char kind[16] = {0};
+        int index = -1, elem = 0;
+        sscanf_s(line + 7, "%15s %d %d", kind, (unsigned)sizeof(kind), &index, &elem);
+        bool dp = _stricmp(kind, "dep") == 0 || _stricmp(kind, "prot") == 0;
+        pfn_detect_dp fdp = _stricmp(kind, "dep") == 0 ? g_api.detect_dep
+                          : _stricmp(kind, "prot") == 0 ? g_api.detect_prot : nullptr;
+        pfn_detect_bc fbc = _stricmp(kind, "blend") == 0 ? g_api.detect_blend
+                          : _stricmp(kind, "chamfer") == 0 ? g_api.detect_chamf : nullptr;
+        if (dp ? !fdp : !fbc) { Reply("ERR unknown or unresolved detect kind %s", kind); return; }
+
+        void* faces = VirtualAlloc(nullptr, 8192, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        void* found = VirtualAlloc(nullptr, 8192, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (!faces || !found) { Reply("ERR out of memory"); return; }
+        g_api.list_ctor(faces);
+        g_api.list_ctor(found);
+        outcome_slot oc;
+        int err = 0;
+        oc = g_api.get_faces((ENTITY*)g_body, (ENTITY_LIST*)faces, 0, nullptr);
+        Outcome(g_api, oc, &err);
+        int n = g_api.list_count(faces);
+        const ENTITY* seed = nullptr;
+        if (index >= 0 && index < n) seed = g_api.list_at(faces, index);
+        else if (index == -1 && dp) seed = (const ENTITY*)g_body;
+        if (!seed) {
+            Reply("ERR bad face index %d (faces=%d)", index, n);
+        } else {
+            oc = dp ? fdp(seed, found, nullptr) : fbc((const FACE*)seed, found, elem, nullptr);
+            bool ok = Outcome(g_api, oc, &err);
+            if (!ok) {
+                Reply("ERR api_detect_%s errno=%d %s: %s", kind, err,
+                      g_api.err_ident ? g_api.err_ident(err) : "?",
+                      g_api.err_mess ? g_api.err_mess(err) : "?");
+            } else {
+                char ids[2048] = {0};
+                size_t used = 0;
+                int m = g_api.list_count(found);
+                for (int i = 0; i < m && used + 8 < sizeof(ids); i++) {
+                    ENTITY* e = g_api.list_at(found, i);
+                    int at = -1;
+                    for (int j = 0; j < n; j++) if (g_api.list_at(faces, j) == e) { at = j; break; }
+                    used += snprintf(ids + used, sizeof(ids) - used, "%s%d", i ? "," : "", at);
+                }
+                Reply("OK found=%d faces=[%s]", m, ids);
+            }
+        }
+        g_api.list_dtor(found);
+        g_api.list_dtor(faces);
+        VirtualFree(found, 0, MEM_RELEASE);
+        VirtualFree(faces, 0, MEM_RELEASE);
+        return;
+    }
+    if (strncmp(line, "errmsg ", 7) == 0) {
+        int n = atoi(line + 7);
+        Reply("OK %d %s: %s", n, g_api.err_ident ? g_api.err_ident(n) : "?",
+              g_api.err_mess ? g_api.err_mess(n) : "?");
         return;
     }
     if (strncmp(line, "quit", 4) == 0) { Reply("OK bye"); return; }
