@@ -1,5 +1,8 @@
 # AGENTS.md — 给其他 agent 的接入说明
 
+> **要改这个仓库的代码，先看 [docs/DEVELOPING.md](docs/DEVELOPING.md)**：代码地图、构建命令（`/MD` 硬规则）、
+> 加工具的三种套路、验证回路、调试入口。本文件只讲"怎么用"。
+
 这是一个 **MCP 服务器**，让 agent 操作 CST Studio Suite 2022：建模、求解、读结果、直接改几何。
 
 ## 接入（二选一）
