@@ -1,7 +1,10 @@
 # PLAN — 从 `models/cnc-bottom.sat` 反求特征树并重建（路线 B）
 
-> 状态（2026-10-29）：**S3 小件自测已跑，Defeature 无授权**（`errno=5000 UNAUTHORIZED_FUNCTIONALITY`，见 §1.5）。
-> 按风险 1 的预案，识别要改成自研（面类型 + 轴线聚类 + 凸凹判据）；S4 之后的步骤不受影响。
+> 状态（2026-10-30）：**已按自研路线跑完一轮，结果见 [docs/feature-tree-cnc-bottom.md](docs/feature-tree-cnc-bottom.md)。**
+> 特征树与整体重建可用（CST 重建体积 −0.55%）；圆角/倒角重放成功率约 1/4，拔模可重放但大多去不掉。
+> 下文是开工前的计划，保留作背景；S3 之后的实际做法以报告为准。
+>
+> 旧状态（2026-10-29）：S3 小件自测已跑，Defeature 无授权（`errno=5000 UNAUTHORIZED_FUNCTIONALITY`，见 §1.5）。
 > 本文只写可执行的东西：已证实的事实、已有资产、逐步验收。
 
 ---

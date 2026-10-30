@@ -58,6 +58,9 @@ typedef outcome_slot(__cdecl* pfn_restore_list)(void*, int, void*, AcisOptions*)
 // api_tweak_faces(int, FACE**, SURFACE**, int*, SPAposition /*by value*/, void* /*back-ref, scalar*/, AcisOptions*)
 typedef outcome_slot(__cdecl* pfn_api_tweak_faces)(int, FACE**, SURFACE**, int*, SPAposition, void*, AcisOptions*);
 typedef const char* (__cdecl* pfn_err_text)(int);
+// api_point_in_body(const SPAposition&, BODY*, point_containment&, int use_boxes, AcisOptions*)
+typedef outcome_slot(__cdecl* pfn_point_in_body)(const SPAposition*, BODY*, int*, int, AcisOptions*);
+#define SYM_POINT_IN_BODY "?api_point_in_body@@YA?AVoutcome@@AEBVSPAposition@@PEAVBODY@@AEAW4point_containment@@HPEAVAcisOptions@@@Z"
 // api_detect_depression/protrusion(const ENTITY*, ENTITY_LIST&, const detect_feature_options*)
 typedef outcome_slot(__cdecl* pfn_detect_dp)(const ENTITY*, void*, const void*);
 // api_detect_blends/chamfers(const FACE*, ENTITY_LIST&, <element type enum>, const detect_feature_options*)
@@ -148,6 +151,7 @@ struct Api {
     pfn_err_text err_ident, err_mess;
     pfn_detect_dp detect_dep, detect_prot;
     pfn_detect_bc detect_blend, detect_chamf;
+    pfn_point_in_body point_in_body;
     pfn_tweak2 tweak2;
     pfn_tweak_init tweak_init;
     pfn_move_faces move_faces;
@@ -191,6 +195,7 @@ static bool ResolveAll(Api& a) {
     a.detect_prot = Res<pfn_detect_dp>(a.h, SYM_DETECT_PROT);
     a.detect_blend = Res<pfn_detect_bc>(a.h, SYM_DETECT_BLEND);
     a.detect_chamf = Res<pfn_detect_bc>(a.h, SYM_DETECT_CHAMF);
+    a.point_in_body = Res<pfn_point_in_body>(a.h, SYM_POINT_IN_BODY);
     a.tweak2 = Res<pfn_tweak2>(a.h, SYM_TWEAK_FACES2);
     a.tweak_init = Res<pfn_tweak_init>(a.h, SYM_TWEAK_INIT);
     a.move_faces = Res<pfn_move_faces>(a.h, SYM_MOVE_FACES);
@@ -403,7 +408,7 @@ static long WriteSat(void* entity, const char* path) {
     Str32Init(&file, path);
 
     add(obj, (ENTITY*)entity, &name, &mat);
-    bool ok = write(obj, &file, 1.0);
+    bool ok = write(obj, &file, 31.0);   // SAT version; 1.0 drops pointers and most fields
 
     dtor(obj);
     Str32Free(&name);
@@ -426,7 +431,12 @@ static void Reply(const char* fmt, ...) {
     va_end(ap);
 }
 
+#include <string>
+#include <math.h>
+#include "agent_ops.inc"
+
 static void RunRequest(const char* line) {
+    if (RunOps(line)) return;
     if (strncmp(line, "ping", 4) == 0) { Reply("OK pong"); return; }
 
     if (strncmp(line, "block ", 6) == 0) {
@@ -799,6 +809,46 @@ static void RunRequest(const char* line) {
         g_api.list_dtor(faces);
         VirtualFree(found, 0, MEM_RELEASE);
         VirtualFree(faces, 0, MEM_RELEASE);
+        return;
+    }
+    if (strncmp(line, "pgrid ", 6) == 0) {
+        // pgrid x0 y0 z0 dx dy dz nx ny nz <out.bin>
+        // classifies a regular grid against the current body; one byte per point
+        // (point_containment value), x outermost, z innermost
+        if (!g_body) { Reply("ERR no body; run restore first"); return; }
+        if (!g_api.point_in_body) { Reply("ERR api_point_in_body unresolved"); return; }
+        double x0, y0, z0, dx, dy, dz;
+        int nx, ny, nz;
+        char path[512] = {0};
+        if (sscanf_s(line + 6, "%lf %lf %lf %lf %lf %lf %d %d %d %511s", &x0, &y0, &z0, &dx, &dy, &dz,
+                     &nx, &ny, &nz, path, (unsigned)sizeof(path)) != 10 || nx <= 0 || ny <= 0 || nz <= 0) {
+            Reply("ERR usage: pgrid x0 y0 z0 dx dy dz nx ny nz out.bin");
+            return;
+        }
+        size_t n = (size_t)nx * ny * nz;
+        unsigned char* buf = (unsigned char*)malloc(n);
+        if (!buf) { Reply("ERR out of memory"); return; }
+        int counts[5] = {0};
+        int firstErr = 0;
+        DWORD t0 = GetTickCount();
+        size_t k = 0;
+        for (int i = 0; i < nx; i++)
+            for (int j = 0; j < ny; j++)
+                for (int l = 0; l < nz; l++, k++) {
+                    SPAposition p(x0 + i * dx, y0 + j * dy, z0 + l * dz);
+                    int pc = 3;
+                    outcome_slot oc = g_api.point_in_body(&p, g_body, &pc, 1, nullptr);
+                    int err = 0;
+                    if (!Outcome(g_api, oc, &err)) { pc = 4; if (!firstErr) firstErr = err; }
+                    if (pc < 0 || pc > 4) pc = 4;
+                    buf[k] = (unsigned char)pc;
+                    counts[pc]++;
+                }
+        FILE* f = _fsopen(path, "wb", _SH_DENYNO);
+        if (f) { fwrite(buf, 1, n, f); fclose(f); }
+        free(buf);
+        Reply("OK n=%zu c0=%d c1=%d c2=%d c3=%d err=%d firstErrno=%d ms=%lu file=%s", n, counts[0], counts[1],
+              counts[2], counts[3], counts[4], firstErr, GetTickCount() - t0, f ? path : "(write failed)");
         return;
     }
     if (strncmp(line, "errmsg ", 7) == 0) {
