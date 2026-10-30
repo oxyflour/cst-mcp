@@ -124,6 +124,11 @@ def arc_fits(pts):
         return None
     if any(abs(math.hypot(p[0] - c[0], p[1] - c[1]) - c[2]) > FIT_TOL for p in pts):
         return None
+    # the polyline between samples must hug the arc too: a long straight run
+    # ending in a few corner points fits a large circle at its vertices only
+    if any(c[2] - math.sqrt(max(0.0, c[2] ** 2 - math.dist(pts[i], pts[i + 1]) ** 2 / 4)) > FIT_TOL
+           for i in range(len(pts) - 1)):
+        return None
     # monotonic sweep, no step a chord would hide
     ang = [math.atan2(p[1] - c[1], p[0] - c[0]) for p in pts]
     steps = [(ang[i + 1] - ang[i] + math.pi) % (2 * math.pi) - math.pi for i in range(len(ang) - 1)]

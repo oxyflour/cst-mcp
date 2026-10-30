@@ -18,6 +18,11 @@
 //   newbody                             -> forget the current body (next prism new)
 //   snap / undo                         -> keep a copy of the body / go back to it
 //   mass                                -> volume of the body (api_body_mass_props)
+//   offset <d> [vent]                   -> api_offset_body: every face moves d along its normal
+//                                          (outward > 0); vent = lop_options vent_type_id, how
+//                                          the gaps at convex edges are filled
+//   swap                                -> exchange the main body and the aux body
+//   bool add|cut|int                    -> unite / subtract / intersect the aux body into the main one
 
 #include <vector>
 
@@ -39,6 +44,8 @@ typedef outcome_slot(__cdecl* pfn_copy_body)(BODY*, BODY**, AcisOptions*);
 typedef outcome_slot(__cdecl* pfn_del_entity)(ENTITY*, AcisOptions*);
 typedef outcome_slot(__cdecl* pfn_mass_props)(BODY*, void*, void*, AcisOptions*);
 typedef double (__cdecl* pfn_get_volume)(const void*);
+typedef void (__cdecl* pfn_set_vent)(void*, int);
+typedef outcome_slot(__cdecl* pfn_offset_body)(BODY*, double, const SPAposition*, const SPAposition*, void*, AcisOptions*);
 
 struct Ops {
     bool tried, ok;
@@ -54,15 +61,19 @@ struct Ops {
     pfn_obj_ctor sweep_ctor, sweep_dtor;
     pfn_sweep_set_d sweep_draft;
     pfn_sweep_set_i sweep_solid;
-    pfn_bool subtract, unite;
+    pfn_bool subtract, unite, intersect;
     pfn_list_add list_add;
     pfn_copy_body copy_body;
     pfn_del_entity del_entity;
     pfn_mass_props mass_props;
     pfn_obj_ctor mp_ctor, mp_dtor;
     pfn_get_volume mp_volume;
+    pfn_offset_body offset_body;
+    pfn_obj_ctor lop_ctor, lop_dtor;
+    pfn_set_vent set_vent;
 };
 static BODY* g_snap;
+static BODY* g_aux;     // second body: tool/fill bodies are built here, then combined with the main one
 static Ops g_ops;
 
 static bool ResolveOps() {
@@ -84,6 +95,7 @@ static bool ResolveOps() {
     g_ops.sweep_solid = Res<pfn_sweep_set_i>(h, "?set_solid@sweep_options@@QEAAXH@Z");
     g_ops.subtract = Res<pfn_bool>(h, "?api_subtract@@YA?AVoutcome@@PEAVBODY@@0PEAVAcisOptions@@@Z");
     g_ops.unite = Res<pfn_bool>(h, "?api_unite@@YA?AVoutcome@@PEAVBODY@@0PEAVAcisOptions@@@Z");
+    g_ops.intersect = Res<pfn_bool>(h, "?api_intersect@@YA?AVoutcome@@PEAVBODY@@0PEAVAcisOptions@@@Z");
     g_ops.list_add = Res<pfn_list_add>(h, "?add@ENTITY_LIST@@QEAAHPEAVENTITY@@H@Z");
     g_ops.copy_body = Res<pfn_copy_body>(h, "?api_copy_body@@YA?AVoutcome@@PEAVBODY@@AEAPEAV2@PEAVAcisOptions@@@Z");
     g_ops.del_entity = Res<pfn_del_entity>(h, "?api_del_entity@@YA?AVoutcome@@PEAVENTITY@@PEAVAcisOptions@@@Z");
@@ -91,6 +103,10 @@ static bool ResolveOps() {
     g_ops.mp_ctor = Res<pfn_obj_ctor>(h, "??0mass_props@@QEAA@XZ");
     g_ops.mp_dtor = Res<pfn_obj_ctor>(h, "??1mass_props@@QEAA@XZ");
     g_ops.mp_volume = Res<pfn_get_volume>(h, "?get_volume@mass_props@@QEBANXZ");
+    g_ops.lop_ctor = Res<pfn_obj_ctor>(h, "??0lop_options@@QEAA@XZ");
+    g_ops.lop_dtor = Res<pfn_obj_ctor>(h, "??1lop_options@@QEAA@XZ");
+    g_ops.set_vent = Res<pfn_set_vent>(h, "?set_vent_type@lop_options@@QEAAXW4vent_type_id@@@Z");
+    g_ops.offset_body = Res<pfn_offset_body>(h, "?api_offset_body@@YA?AVoutcome@@PEAVBODY@@NAEBVSPAposition@@1PEAVlop_options@@PEAVAcisOptions@@@Z");
 
     const char* inits[] = {"?api_initialize_local_ops@@YA?AVoutcome@@XZ", "?api_initialize_face_removal@@YA?AVoutcome@@XZ",
                            "?api_initialize_blending@@YA?AVoutcome@@XZ", "?api_initialize_sweeping@@YA?AVoutcome@@XZ",
@@ -212,7 +228,8 @@ static bool RunOps(const char* line) {
                 strncmp(line, "taper ", 6) == 0 || strncmp(line, "blend ", 6) == 0 ||
                 strncmp(line, "chamfer ", 8) == 0 || strncmp(line, "prism ", 6) == 0 ||
                 strncmp(line, "newbody", 7) == 0 || strcmp(line, "snap") == 0 || strcmp(line, "undo") == 0 ||
-                strcmp(line, "mass") == 0;
+                strcmp(line, "mass") == 0 || strcmp(line, "swap") == 0 || strncmp(line, "bool ", 5) == 0 ||
+                strncmp(line, "offset ", 7) == 0;
     if (!isOp) return false;
     if (!ResolveOps()) { Reply("ERR feature ops unresolved (see agent log)"); return true; }
 
@@ -220,6 +237,28 @@ static bool RunOps(const char* line) {
         g_body = nullptr;
         g_lastBody = nullptr;
         Reply("OK");
+        return true;
+    }
+
+    if (strcmp(line, "swap") == 0) {
+        BODY* t = g_body;
+        g_body = g_aux;
+        g_aux = t;
+        g_lastBody = nullptr;
+        Reply("OK main=%d aux=%d", g_body ? CountFaces(g_api, g_body) : 0, g_aux ? CountFaces(g_api, g_aux) : 0);
+        return true;
+    }
+    if (strncmp(line, "bool ", 5) == 0) {
+        // bool add|cut: combines the aux body into the main one (aux is consumed)
+        if (!g_body || !g_aux) { Reply("ERR need main and aux bodies"); return true; }
+        int err = 0;
+        pfn_bool fn = strcmp(line + 5, "add") == 0 ? g_ops.unite
+                    : strcmp(line + 5, "int") == 0 ? g_ops.intersect : g_ops.subtract;
+        if (!fn) { Reply("ERR boolean unresolved"); return true; }
+        outcome_slot o = fn(g_aux, g_body, nullptr);
+        g_aux = nullptr;
+        if (!Outcome(g_api, o, &err)) { ReplyErr("bool", err); return true; }
+        Reply("OK faces=%d", CountFaces(g_api, g_body));
         return true;
     }
 
@@ -293,6 +332,25 @@ static bool RunOps(const char* line) {
         g_body = g_snap;
         g_snap = nullptr;
         g_lastBody = nullptr;
+        Reply("OK faces=%d", CountFaces(g_api, g_body));
+        return true;
+    }
+    if (strncmp(line, "offset ", 7) == 0) {
+        double d = 0;
+        int vent = -1;
+        if (sscanf_s(line + 7, "%lf %d", &d, &vent) < 1) { Reply("ERR usage: offset d [vent]"); return true; }
+        if (!g_ops.offset_body) { Reply("ERR api_offset_body unresolved"); return true; }
+        SPAposition lo(-1e4, -1e4, -1e4), hi(1e4, 1e4, 1e4);
+        void* lop = nullptr;
+        if (vent >= 0 && g_ops.lop_ctor && g_ops.set_vent) {
+            lop = VirtualAlloc(nullptr, 8192, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            g_ops.lop_ctor(lop);
+            g_ops.set_vent(lop, vent);
+        }
+        outcome_slot o = g_ops.offset_body(g_body, d, &lo, &hi, lop, nullptr);
+        if (lop) { g_ops.lop_dtor(lop); VirtualFree(lop, 0, MEM_RELEASE); }
+        int err = 0;
+        if (!Outcome(g_api, o, &err)) { ReplyErr("api_offset_body", err); return true; }
         Reply("OK faces=%d", CountFaces(g_api, g_body));
         return true;
     }
