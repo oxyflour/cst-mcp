@@ -7,6 +7,8 @@
   "main": "src/server.mjs",
   "scripts": {
     "start": "node src/server.mjs",
+    "test": "node --test tests/brep.test.mjs",
+    "test:selection": "py -3.12 -m unittest discover -s tests -p test_selection.py",
     "probe": "\"C:\\Programs\\CST Studio Suite 2022\\AMD64\\python\\python.exe\" scripts\\probe_cst.py"
   },
   "dependencies": {

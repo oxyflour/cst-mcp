@@ -372,6 +372,18 @@ def cmd_status(args):
     return 0
 
 
+def cmd_modeler(args):
+    """Resolve/validate the modeler belonging to a connected DE, without guessing."""
+    matches = [pid for pid, parent, exe in processes()
+               if exe.lower() == "modeler_amd64.exe" and parent == args.de_pid
+               and (not args.pid or pid == args.pid)]
+    if len(matches) != 1:
+        raise SystemExit("expected one modeler for DE %d, found %s; pass an explicit modeler PID" %
+                         (args.de_pid, matches))
+    print(json.dumps({"pid": matches[0], "dePid": args.de_pid}))
+    return 0
+
+
 def cmd_inject(args):
     dll = args.dll or newest_agent()
     if not dll:
@@ -573,6 +585,9 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("status", help="show owners, DEs, modelers and agents")
+    p = sub.add_parser("modeler", help="resolve or validate a DE's modeler")
+    p.add_argument("--de-pid", type=int, required=True)
+    p.add_argument("--pid", type=int, default=0)
 
     p = sub.add_parser("symbols", help="check that every ACIS symbol constant resolves")
     p.add_argument("--spaacis", default=r"C:\Programs\CST Studio Suite 2022\ACIS\NT_VC15_64_DLL\code\bin\SpaACIS.dll")
@@ -601,7 +616,7 @@ def main(argv=None):
     p.add_argument("--isolated", action="store_true", help="alias kept for symmetry")
 
     args = ap.parse_args(argv)
-    return {"status": cmd_status, "symbols": cmd_symbols, "inject": cmd_inject, "isolate": cmd_isolate,
+    return {"status": cmd_status, "modeler": cmd_modeler, "symbols": cmd_symbols, "inject": cmd_inject, "isolate": cmd_isolate,
             "up": cmd_up, "down": cmd_down, "close-de": cmd_close_de}[args.cmd](args)
 
 

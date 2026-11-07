@@ -24,6 +24,7 @@ import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { AcisPipe, findModelerPid, satImportCode } from "./acis.mjs";
+import { BrepCatalog, ENTITY_TYPES } from "./brep.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -113,6 +114,12 @@ class Bridge {
     return result;
   }
 
+  exclusive(work) {
+    const result = this.#chain.then(() => work((method, params = {}) => this.#rawCall(method, params)));
+    this.#chain = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
   #rawCall(method, params) {
     this.start();
     const id = randomUUID();
@@ -139,6 +146,7 @@ class Bridge {
 
 const bridge = new Bridge();
 const acis = new AcisPipe();
+const brepCatalog = new BrepCatalog();
 
 /** Newest compiled agent DLL, e.g. native/cst_acis_agent12.dll. */
 function newestAgentDll() {
@@ -168,6 +176,13 @@ async function autoInject(pid) {
   return true;
 }
 
+async function modelerForDe(dePid, pid) {
+  const args = [...PYTHON_ARGS, path.join(ROOT, "tools", "cstmcp.py"), "modeler", "--de-pid", String(dePid)];
+  if (pid) args.push("--pid", String(pid));
+  const { stdout } = await execFileAsync(PYTHON, args, { windowsHide: true });
+  return JSON.parse(stdout).pid;
+}
+
 /* -------------------------------------------------------------------- tools */
 
 const text = (value) => ({
@@ -178,6 +193,78 @@ const fail = (err) => ({
   isError: true,
   content: [{ type: "text", text: `${err.type ? `[${err.type}] ` : ""}${err.message}` }],
 });
+
+const brepText = (value, label = "BRep") => {
+  const json = JSON.stringify(value);
+  if (Buffer.byteLength(json, "utf8") > 32768) {
+    throw Object.assign(new Error(`${label} response exceeds 32 KiB; request fewer entities`), { code: "RESPONSE_TOO_LARGE" });
+  }
+  return { content: [{ type: "text", text: json }] };
+};
+
+async function runBrepQuery(operation, args) {
+  return bridge.exclusive(async (call) => {
+    const status = await call("de.status");
+    if (!status.connected || !status.has_active_project) throw new Error("call cst_connect and activate a 3D project first");
+    if (!acis.connected) throw new Error("call acis_connect for this project's modeler first");
+    return acis.exclusive(async (send) => {
+      await modelerForDe(status.pid, acis.pid);
+      if ((await call("solver.state")).running) throw new Error("stop the solver before reading BRep");
+      brepCatalog.bind(JSON.stringify([status.pid, acis.pid, status.active_project]));
+      const read = async (selector) => {
+        await send("brep_begin");
+        let manifest, captures;
+        try {
+          manifest = await call("brep.enumerate", selector);
+        } finally {
+          captures = JSON.parse(await send("brep_end"));
+        }
+        if (manifest.file !== status.active_project.file) {
+          throw Object.assign(new Error("active project changed during the query; list solids again"), { code: "PROJECT_CHANGED" });
+        }
+        if (captures.length !== manifest.solids.length) {
+          throw new Error(`BRep capture incomplete: ${captures.length} bodies for ${manifest.solids.length} solids`);
+        }
+        return { total: manifest.total, solids: manifest.solids.map((solid, i) => ({ ...solid, ...captures[i] })) };
+      };
+      return brepCatalog[operation](args, read);
+    });
+  });
+}
+
+function registerBrepTools(server) {
+  const id = z.string().min(1).max(128).describe("Opaque entity ID returned by a BRep query; do not construct or parse it");
+  const offset = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).default(0);
+  const limit = z.number().int().min(1).max(200).default(50);
+  const description = " Read-only live-memory query; no file export or snapshot ID. " +
+    "Requires cst_connect and acis_connect. IDs are project-scoped and invalid after server restart; " +
+    "re-list entities after topology/coordinate changes. Responses are capped at 32 KiB.";
+  const specs = [
+    ["cst_list_solids", "List solids", "List a page of solid IDs, names, materials and entity counts. Start BRep exploration here.",
+      { offset, limit }, "listSolids"],
+    ["cst_list_entities", "List solid entities", "List only entity IDs of a given type within a solid. geometryType filters faces/edges without expanding topology.",
+      { solidId: id, type: z.enum(ENTITY_TYPES), geometryType: z.enum(["plane", "cone", "sphere", "torus", "spline", "straight", "ellipse", "intcurve", "other", "none"]).optional(), offset, limit }, "listEntities"],
+    ["cst_get_entity", "Read one entity", "Read one entity's scalar properties and direct ID links. Solids return counts; vertices return global and BODY-local coordinates in project units. Large child collections are never expanded.",
+      { id }, "getEntity"],
+    ["cst_get_entities", "Read a batch of entities", "Read up to 20 entity records in input order. The batch is atomic: any stale/missing ID fails the entire request.",
+      { ids: z.array(id).min(1).max(20) }, "getEntities"],
+    ["cst_get_adjacency", "Read topology relations", "List related entity IDs. A face supports loops/coedges/edges/vertices/adjacent_faces; an edge supports vertices/coedges/faces; a vertex supports edges/faces. ordered=true preserves order and repeated seam edges. get_entity returns singleton links.",
+      { id, relation: z.enum(["lumps", "shells", "faces", "loops", "coedges", "edges", "vertices", "wires", "adjacent_faces"]), offset, limit }, "adjacency"],
+    ["cst_get_loop_boundary", "Read ordered loop boundary", "Read a page of oriented loop segments: coedge/edge IDs, start/end vertex IDs, sense and partner ID. Walk face.loops first. Pages start at the loop's first coedge; nextOffset continues the same ordered ring.",
+      { loopId: id, offset, limit: z.number().int().min(1).max(50).default(20) }, "loopBoundary"],
+  ];
+  for (const [name, title, detail, inputSchema, operation] of specs) {
+    server.registerTool(name, { title, description: detail + description, inputSchema, annotations: { readOnlyHint: true } },
+      async (args) => {
+        try { return brepText(await runBrepQuery(operation, args)); }
+        catch (err) {
+          return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: {
+            code: err.code ?? "BREP_QUERY_FAILED", message: err.message,
+          } }) }] };
+        }
+      });
+  }
+}
 
 function buildServer() {
   const server = new McpServer(
@@ -332,6 +419,31 @@ function buildServer() {
    * back to CST through the SAT reader.
    */
 
+  registerBrepTools(server);
+
+  server.registerTool(
+    "cst_get_selection",
+    {
+      title: "Read current selection",
+      description: "Read the active project's current tree selection and picked faces, edges and points without changing it. " +
+        "Returns tree paths/solid names and materials, native CST face IDs and areas, native edge/start-vertex IDs, " +
+        "and picked point global coordinates. Native cstFaceId/cstEdgeId values are not BRep opaque IDs; picked points " +
+        "need not be BRep vertices. Page order: tree items, faces, edges, points. Includes counts for every category. " +
+        "Needs cst_connect only, no acis_connect, no export or history entry. Does not read hover preselection. Max response 32 KiB.",
+      inputSchema: {
+        offset: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).default(0),
+        limit: z.number().int().min(1).max(100).default(50),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async (args) => {
+      try { return brepText(await bridge.call("selection.read", args), "Selection"); }
+      catch (err) { return { isError: true, content: [{ type: "text", text: JSON.stringify({ error: {
+        code: err.code ?? "SELECTION_QUERY_FAILED", message: err.message,
+      } }) }] }; }
+    },
+  );
+
   server.registerTool(
     "cst_import_step",
     {
@@ -446,7 +558,9 @@ function buildServer() {
     async ({ pid }) => {
       try {
         // Pinned modeler wins: that is the one belonging to *our* DE.
-        const target = pid ?? CONFIG.modelerPid ?? (await findModelerPid());
+        const status = await bridge.call("de.status");
+        const target = pid ?? (CONFIG.modelerPid || (status.connected ? await modelerForDe(status.pid) : await findModelerPid()));
+        if (status.connected) await modelerForDe(status.pid, target);
         try {
           await acis.connect(target);
         } catch (first) {

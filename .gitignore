@@ -2,6 +2,7 @@ node_modules/
 *.log
 *.tmp
 .cache/
+__pycache__/
 
 # MSVC build output
 native/*.dll

@@ -30,6 +30,17 @@ export class AcisPipe {
   #buf = "";
   #waiters = [];
   #pid = null;
+  #chain = Promise.resolve();
+
+  #enqueue(work) {
+    const result = this.#chain.then(work, work);
+    this.#chain = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  exclusive(work) {
+    return this.#enqueue(() => work((command) => this.#send(command)));
+  }
 
   get pid() {
     return this.#pid;
@@ -40,6 +51,10 @@ export class AcisPipe {
   }
 
   connect(pid) {
+    return this.#enqueue(() => this.#connect(pid));
+  }
+
+  #connect(pid) {
     // Idempotent: the agent serves one connection at a time, so opening a
     // second socket to the same modeler blocks until the 30 s timeout.
     if (this.#socket && this.#pid === pid) return Promise.resolve(pid);
@@ -56,6 +71,7 @@ export class AcisPipe {
         sock.off("error", onError);
         sock.on("data", (chunk) => this.#onData(chunk));
         sock.on("close", () => {
+          if (this.#socket !== sock) return;
           this.#socket = null;
           for (const w of this.#waiters.splice(0)) w.reject(new Error("agent pipe closed"));
         });
@@ -81,6 +97,10 @@ export class AcisPipe {
   }
 
   send(command) {
+    return this.#enqueue(() => this.#send(command));
+  }
+
+  #send(command) {
     if (!this.#socket) return Promise.reject(new Error("not connected to the ACIS agent"));
     return new Promise((resolve, reject) => {
       this.#waiters.push({ resolve, reject });
@@ -91,6 +111,7 @@ export class AcisPipe {
   close() {
     this.#socket?.end();
     this.#socket = null;
+    this.#buf = "";
   }
 }
 

@@ -54,9 +54,11 @@ def m_de_connect(params):
     if STATE["de"] is not None:
         try:
             if STATE["de"].is_connected():
-                STATE["de"].close()
+                if mode == "any" or (mode == "pid" and STATE["de"].pid() == pid):
+                    return {"pid": STATE["de"].pid(), "version": ci.DesignEnvironment.version()}
         except Exception:
             pass
+        # close() terminates the Design Environment; reconnecting must not do that.
         STATE["de"] = None
 
     if mode == "any":
@@ -186,6 +188,26 @@ def m_shutdown(params):
     return {"bye": True}
 
 
+def m_brep_enumerate(params):
+    from live_brep import enumerate_solids
+    de = de_require()
+    project = de.active_project()
+    if project.modeler is None:
+        raise RuntimeError("active project has no 3D modeler")
+    if project.modeler.is_solver_running():
+        raise RuntimeError("stop the solver before taking a BRep snapshot")
+    return enumerate_solids(project, names=params.get("names"), offset=params.get("offset", 0),
+                            limit=params.get("limit"))
+
+
+def m_selection_read(params):
+    from selection import read_selection
+    project = de_require().active_project()
+    if project.modeler is None:
+        raise RuntimeError("active project has no 3D modeler")
+    return read_selection(project, offset=params.get("offset", 0), limit=params.get("limit", 50))
+
+
 METHODS = {
     "ping": m_ping,
     "de.list": m_de_list,
@@ -200,6 +222,8 @@ METHODS = {
     "solver.state": m_solver_state,
     "solver.abort": m_solver_abort,
     "results.tree": m_results_tree,
+    "brep.enumerate": m_brep_enumerate,
+    "selection.read": m_selection_read,
     "shutdown": m_shutdown,
 }
 

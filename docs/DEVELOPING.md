@@ -22,12 +22,16 @@ py -3.12 tools\cstmcp.py down ; py -3.12 tools\cstmcp.py up -WithCst
 
 | 文件 | 职责 | 改它的时候注意 |
 |---|---|---|
-| `src/server.mjs` | MCP 传输层 + 15 个工具注册 + HTTP/stdio 两个入口 | 工具只是薄壳；业务逻辑往桥/代理里放 |
+| `src/server.mjs` | MCP 传输层 + 22 个工具注册 + HTTP/stdio 两个入口 | 工具只是薄壳；业务逻辑往桥/代理里放 |
 | `src/acis.mjs` | 命名管道客户端、`findModelerPid()`、`satImportCode()` | 行协议：一条命令一行，回 `OK ...` / `ERR ...` |
+| `src/brep.mjs` | BRep entity ID、分页、详情、邻接和有序边界 | 不缓存 native 指针；每次查询重新取得目标 solid，校验 ID 与拓扑/坐标指纹 |
 | `bridge/cst_bridge.py` | CST 适配器，跑在 **CST 自带 python 3.6** | 只能用 3.6 语法；只 import 标准库 + `cst.*` |
 | `native/cst_acis_agent.cpp` | 常驻代理（管道服务 + UI 线程调度 + ACIS 调用） | 崩溃半径是整个 CST 会话 |
 | `native/acis_shim.h` | `outcome_slot`、`SPAposition`、符号常量 | 所有 ABI 假设都在这里 |
 | `native/acis_direct.h` | 直接建模子集的函数指针类型 | 含回引的函数标了 `INFERRED` |
+| `native/agent_brep.inc` / `native/acis_brep.h` | 运行中模型的只读拓扑捕获及符号 | 见 [live-brep.md](live-brep.md)，不得缓存 BODY 指针供后续请求使用 |
+| `bridge/live_brep.py` | 只读控制宏枚举 solid，清单走内存命名管道 | Python 3.6；不走 add_to_history，不输出几何文件 |
+| `bridge/selection.py` | 当前树选择与 face/edge/point 拾取状态 | 复用只读控制宏回传；原生 pick ID 与 BRep 不透明 ID 不混用，见 [selection.md](selection.md) |
 | `tools/cstmcp.py inject` | 注入器（`CreateRemoteThread(LoadLibraryW)`） | 换 DLL 名不会重跑 `DllMain`，要用新文件名 |
 | `native/build.bat` | MSVC 构建 | **`/MD` 不能去掉** |
 | `scripts/*.py` `tools/cstmcp.py` | 符号扫描、反汇编、ABI 探测、导入测试 | 都是只读诊断工具 |

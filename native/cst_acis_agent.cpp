@@ -19,6 +19,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <share.h>
+#include <string>
+#include <cmath>
 #include "acis_direct.h"
 
 static HMODULE g_self;
@@ -43,7 +45,7 @@ static void Log(const char* fmt, ...) {
 
 static CRITICAL_SECTION g_lock;
 static char g_request[1024];
-static char g_response[4096];
+static std::string g_response;
 static HANDLE g_jobDone;
 static volatile LONG g_jobPending;
 
@@ -427,15 +429,19 @@ static long WriteSat(void* entity, const char* path) {
 static void Reply(const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(g_response, sizeof(g_response), fmt, ap);
+    char buffer[4096];
+    vsnprintf(buffer, sizeof(buffer), fmt, ap);
+    g_response = buffer;
     va_end(ap);
 }
 
 #include <string>
 #include <math.h>
 #include "agent_ops.inc"
+#include "agent_brep.inc"
 
 static void RunRequest(const char* line) {
+    if (RunBrepRequest(line)) return;
     if (RunOps(line)) return;
     if (strncmp(line, "ping", 4) == 0) { Reply("OK pong"); return; }
 
@@ -910,7 +916,7 @@ static DWORD FindUiThread(DWORD pid) {
 static bool ExecOnUiThread(const char* line) {
     EnterCriticalSection(&g_lock);
     strncpy_s(g_request, sizeof(g_request), line, _TRUNCATE);
-    g_response[0] = 0;
+    g_response.clear();
     ResetEvent(g_jobDone);
     InterlockedExchange(&g_jobPending, 1);
     PostThreadMessageW(g_uiTid, WM_NULL, 0, 0);
@@ -948,13 +954,20 @@ static DWORD WINAPI PipeServer(LPVOID) {
             if (!ok) Reply("ERR timeout waiting for the UI thread");
 
             DWORD wrote = 0;
-            char out[4200];
-            _snprintf_s(out, sizeof(out), _TRUNCATE, "%s\n", g_response);
-            WriteFile(pipe, out, (DWORD)strlen(out), &wrote, nullptr);
-            Log("[pipe] -> %s", g_response);
+            std::string out = g_response + "\n";
+            // Preserve the complete JSON line even beyond the 8 KiB pipe buffer.
+            size_t sent = 0;
+            while (sent < out.size()) {
+                DWORD chunk = (DWORD)(std::min)(out.size()-sent, (size_t)65536);
+                if (!WriteFile(pipe,out.data()+sent,chunk,&wrote,nullptr) || !wrote) break;
+                sent += wrote;
+            }
+            if (g_response.size()<4096) Log("[pipe] -> %s", g_response.c_str());
+            else Log("[pipe] -> BRep response %zu bytes", g_response.size());
 
             if (strncmp(buf, "quit", 4) == 0) { DisconnectNamedPipe(pipe); CloseHandle(pipe); return 0; }
         }
+        if (g_brepCapturing) ExecOnUiThread("brep_cancel");
         DisconnectNamedPipe(pipe);
         CloseHandle(pipe);
     }

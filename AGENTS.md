@@ -65,13 +65,19 @@ py -3.12 tools\cstmcp.py up --de-pid <DE> --modeler-pid <modeler>
 | ACIS 代理 | **不用手动注入**：首次 `acis_connect` 自动把最新的 `native/cst_acis_agent*.dll` 注入到 modeler。注入前会等 modeler 把 SpaACIS 加载完并 settle，否则会把它弄崩 |
 | CST 3D 项目 | ACIS 工具要求 `modeler_AMD64.exe` 在跑（CST 里打开一个 3D 项目） |
 
-## 工具（15 个）
+## 工具（22 个）
 
 **VBA 层**（走 `cst.interface`，先 `cst_connect`）
 
 | 工具 | 作用 |
 |---|---|
 | `cst_status` | 运行中的 DE、连接状态、活动项目 |
+| `cst_get_selection` | 只读获取当前树选择及拾取的面/边/点，返回原生 CST ID、面面积和点坐标；支持分页，只需 cst_connect，见 [docs/selection.md](docs/selection.md) |
+| `cst_list_solids` | 分页列出 solid ID、名称、材质和拓扑计数；BRep 查询入口，需同时连接对应 ACIS 代理 |
+| `cst_list_entities` | 按 solid ID、entity 类型分页列出 ID，可筛选曲面/曲线类型 |
+| `cst_get_entity` / `cst_get_entities` | 按 ID 查询单个实体或至多 20 个实体的属性及直接连接 ID |
+| `cst_get_adjacency` | 分页读取包含/邻接关系：face 的 loops/edges/adjacent_faces、edge 的 faces 等 |
+| `cst_get_loop_boundary` | 分页读取环中有序、带方向的半边与端点 ID；以上接口均不需 snapshot ID，响应限 32 KiB，见 [docs/live-brep.md](docs/live-brep.md) |
 | `cst_connect` | 附着到已运行的 DE（`mode=any`/`pid`），不新开实例 |
 | `cst_open_project` | 打开 `.cst` |
 | `cst_vba` | 在活动项目里执行任意 VBA（万能口，也是最大风险） |
