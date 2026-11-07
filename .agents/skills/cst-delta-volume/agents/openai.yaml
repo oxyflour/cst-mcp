@@ -1,0 +1,3 @@
+interface:
+  display_name: "CST Delta Volume"
+  short_description: "Edit picked CST faces with local delta volumes"

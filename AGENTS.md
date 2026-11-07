@@ -6,6 +6,12 @@
 这是一个 **MCP 服务器**，让 agent 操作 CST Studio Suite 2022：建模、求解、读结果、直接改几何。
 编排全部在 `tools/cstmcp.py`（纯 Python + ctypes，无第三方依赖），不再有 PowerShell 脚本。
 
+## 仓库内 skill
+
+用户选面后通过增减料体进行直接建模编辑，使用
+[cst-delta-volume](.agents/skills/cst-delta-volume/SKILL.md)：SAT/BRep 分析、局部 delta 求差、
+副本回放验证、CST 历史应用；默认不使用 computer-use。
+
 ## 接入（三选一）
 
 **A. stdio，共享**（客户端自己拉起进程；多个客户端共用一个所有者、一套 CST）
